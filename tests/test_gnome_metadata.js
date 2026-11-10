@@ -12,6 +12,8 @@ test('R-ext-1: metadata and module shape', () => {
     assert.equal(meta.description,
         'Runs atree, the map of coding-agent sessions, as a live see-through widget on the desktop.');
     assert.deepEqual(meta['shell-version'], ['45', '46', '47', '48', '49', '50', '51']);
+    // staying enabled on the lock screen keeps unlock from killing and respawning the widget
+    assert.deepEqual(meta['session-modes'], ['user', 'unlock-dialog']);
     const src = fs.readFileSync(path.join(EXT_DIR, 'extension.js'), 'utf8');
     assert.match(src, /export default class \w+ extends Extension/);
 });

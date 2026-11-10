@@ -63,5 +63,5 @@ and `OPENCODE_DB` are honoured.
 ## Tests
 
     .venv/bin/python -m unittest discover -s tests       # Python and offscreen Qt
-    node --test tests/                                    # the GNOME extension
+    node --test tests/test_gnome_*.js                     # the GNOME extension
     gjs tests/gjs_node_shim.js "$PWD"/tests/test_gnome_*.js   # same, without Node

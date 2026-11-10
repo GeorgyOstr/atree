@@ -200,6 +200,7 @@ function makeWorld({wayland = false, waylandCheck = true, setType = false, files
     if (!waylandCheck)  // GNOME 49+
         delete Meta.is_wayland_compositor;
 
+    const sessionMode = new Emitter();
     const layoutManager = new Emitter();
     Object.defineProperty(layoutManager, 'primaryIndex', {get: () => world.primaryIndex});
     layoutManager.getWorkAreaForMonitor = () => {
@@ -243,7 +244,7 @@ function makeWorld({wayland = false, waylandCheck = true, setType = false, files
         .replace(/^import .*$/mg, '')
         .replace('export default class', 'globalThis.__Ext = class');
     const sandbox = {
-        GLib, Gio, Meta, Main: {layoutManager, activateWindow: win => world.activated.push(win)},
+        GLib, Gio, Meta, Main: {layoutManager, sessionMode, activateWindow: win => world.activated.push(win)},
         Extension, global: fakeGlobal,
         console: fakeConsole, TextDecoder, TextEncoder,
     };
@@ -254,6 +255,7 @@ function makeWorld({wayland = false, waylandCheck = true, setType = false, files
     world.Meta = Meta;
     world.global = fakeGlobal;
     world.layoutManager = layoutManager;
+    world.sessionMode = sessionMode;
     world.Ext = sandbox.__Ext;
     world.make = () => new sandbox.__Ext({uuid: 'atree@atree', path: EXT_DIR});
 

@@ -3,5 +3,6 @@
   "name": "atree Desktop",
   "description": "Runs atree, the map of coding-agent sessions, as a live see-through widget on the desktop.",
   "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "session-modes": ["user", "unlock-dialog"],
   "version": 1
 }

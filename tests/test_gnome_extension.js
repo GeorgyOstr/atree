@@ -376,6 +376,23 @@ test('R-ext-15: a monitor event with an area places the window once and settles'
     ext.disable();
 });
 
+test('R-ext-15b: leaving the lock screen re-places the window that lived through it', () => {
+    const w = withConfig(GOOD);
+    const ext = w.make();
+    ext.enable();
+    const win = w.makeWindow();
+    w.map(win);
+    w.advance(60000);
+    const placed = win.resizes.length;
+    w.area = {x: 0, y: 32, width: 3456, height: 2128};
+    w.sessionMode.emit('updated');
+    w.advance(60000);
+    assert.deepEqual(win.resizes[placed], [false, 0, 32, 3456, 2128]);
+    assert.equal(w.pending(), 0);
+    ext.disable();
+    assert.equal(w.sessionMode._handlers.size, 0);
+});
+
 test('R-ext-10: unmanaged forgets the window; being raised sinks it again', () => {
     const w = withConfig(GOOD);
     const ext = w.make();
