@@ -42,6 +42,9 @@ export default class AtreeDesktop extends Extension {
         this._connect(global.display, 'workareas-changed', () => this._check(true));
         this._connect(global.display, 'restacked', () => this._check(false));
         this._connect(Main.layoutManager, 'monitors-changed', () => this._check(true));
+        // enabled on the lock screen too (metadata session-modes): the widget survives a lock,
+        // and leaving it re-verifies the placement, as monitors may have changed meanwhile
+        this._connect(Main.sessionMode, 'updated', () => this._check(true));
         this._export();
         this._spawn();
     }
