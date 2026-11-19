@@ -808,25 +808,27 @@ def account_bars(accounts, now):
         left = _round(sum(x["left"] for x in series) / len(series))  # accounts weigh the same
         rows.append(dict(series[0], label=str(label or ""), series=series, left=left, used=100 - left))
     legend = [{"account": str(a.get("name") or ""), "slot": slot} for slot, a in enumerate(accounts)]
-    # extra-usage credits: one graph, a series per account that has them; totals in the text
-    series, tips, used_sum, limit_sum, cur = [], [], 0.0, 0.0, "USD"
+    # extra-usage credits: one graph of what is left (a series per account), the total left as text;
+    # an account whose credits are off has none left
+    series, tips, left_sum, cur = [], [], 0.0, "USD"
     for slot, a in enumerate(accounts):
         c = a.get("credits")
         acct = str(a.get("name") or "")
         if not isinstance(c, dict):
             continue
         if "off" in c:
+            series.append({"slot": slot, "frac": 0.0})
             tips.append("%s: off (%s)" % (acct, c["off"]))
             continue
         used, limit, cur = float(c.get("used") or 0), float(c.get("limit") or 0), c.get("currency") or "USD"
-        series.append({"slot": slot, "frac": min(1.0, used / limit) if limit > 0 else 0.0})
-        tips.append("%s: %s of %s" % (acct, money(used, cur), money(limit, cur)))
-        used_sum, limit_sum = used_sum + used, limit_sum + limit
+        left = max(0.0, limit - used)
+        series.append({"slot": slot, "frac": left / limit if limit > 0 else 0.0})
+        tips.append("%s: %s left (%s of %s spent)" % (acct, money(left, cur), money(used, cur), money(limit, cur)))
+        left_sum += left
     credit = None
     if series:
-        credit = {"series": series, "full": used_sum >= limit_sum,
-                  "text": "%s/%s" % (money(used_sum, cur), money(limit_sum, cur)),
-                  "tip": "credits this month\n" + "\n".join(tips)}
+        credit = {"series": series, "full": left_sum <= 0, "text": money(round(left_sum, 2), cur),
+                  "tip": "extra-usage credits left this month\n" + "\n".join(tips)}
     return rows, legend, credit
 
 

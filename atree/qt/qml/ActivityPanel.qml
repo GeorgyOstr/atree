@@ -164,7 +164,7 @@ SidePanel {
                             required property var modelData
                             text: modelData.name + " " + ((modelData.text || {})[matrix.tool] || "0")
                             font.pixelSize: 10
-                            color: Theme.muted
+                            color: Theme.toolColor(matrix.tool)
                         }
                     }
                 }

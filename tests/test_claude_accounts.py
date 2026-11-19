@@ -34,7 +34,9 @@ class Accounts(unittest.TestCase):
         self.assertEqual(rows[0]["left"], 52)  # the accounts' average
         self.assertEqual(legend, [{"account": "claude", "slot": 0}, {"account": "claude1", "slot": 1}])
         self.assertEqual((credit["series"], credit["text"], credit["full"]),
-                         ([{"slot": 0, "frac": 1.0}], "$250.23/$250", True))
+                         ([{"slot": 0, "frac": 0.0}, {"slot": 1, "frac": 0.0}], "$0", True))
+        accounts[0]["credits"] = {"used": 100, "limit": 250}
+        self.assertEqual(L.account_bars(accounts, NOW)[2]["text"], "$150")
         self.assertIn("claude1: off (out of credits)", credit["tip"])
 
     def test_short_numbers_and_week_tokens(self):

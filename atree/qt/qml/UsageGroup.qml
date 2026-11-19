@@ -56,25 +56,23 @@ Column {
                                       : Ui.hideTip(parent)
         }
     }
-    Repeater {
-        model: group.data_.accounts || []
-        Row {
-            id: acct
-            objectName: "usageAccount"
-            required property var modelData
-            spacing: 4
-            anchors.verticalCenter: parent.verticalCenter
+    Row {
+        // one dot per account; its name is in the dot's tooltip
+        visible: (group.data_.accounts || []).length > 0
+        spacing: 3
+        anchors.verticalCenter: parent.verticalCenter
+        Repeater {
+            model: group.data_.accounts || []
             Rectangle {
+                id: acct
+                objectName: "usageAccount"
+                required property var modelData
                 width: 6; height: 6; radius: 3
                 color: Theme.accountColor(acct.modelData.slot)
                 anchors.verticalCenter: parent.verticalCenter
-            }
-            Text {
-                text: acct.modelData.account
-                textFormat: Text.PlainText
-                font.pixelSize: 10
-                color: Theme.muted
-                anchors.verticalCenter: parent.verticalCenter
+                HoverHandler {
+                    onHoveredChanged: hovered ? Ui.showTip(acct, acct.modelData.account, 300) : Ui.hideTip(acct)
+                }
             }
         }
     }
