@@ -60,7 +60,7 @@ def _init():
     return {"cwd": None, "first": None, "last": None, "branch": None, "ai": None,
             "custom": None, "first_msg": None, "prompts": 0, "uuids": set(),
             "ext_parent": None, "days": {}, "context": 0, "total": 0,
-            "msg": None, "msg_tokens": 0, "msg_day": None, "tdays": {}}
+            "msg": None, "msg_tokens": 0, "msg_day": None, "tdays": {}, "mids": {}}
 
 
 def _step(st, line):
@@ -97,7 +97,7 @@ def _step(st, line):
         mid = m.group(1).decode() if m else None
         if mid != st["msg"]:
             st["total"] += st["msg_tokens"]
-            base.add_day(st["tdays"], st["msg_day"], st["msg_tokens"])
+            _spend(st["tdays"], st["mids"], st["msg"], st["msg_day"], st["msg_tokens"])
             st["msg"] = mid
             st["msg_day"] = st["last"]
         st["msg_tokens"] = ctx
@@ -119,14 +119,25 @@ def _step(st, line):
             st["first_msg"] = text[:400]
 
 
+def _spend(tdays, mids, mid, iso_ts, n):
+    t = base.iso_to_epoch(iso_ts) if n else None
+    if t:
+        day = base.local_day(t)
+        tdays[day] = tdays.get(day, 0) + n
+        if mid:
+            mids[mid] = (day, n)
+
+
 def _finish(st):
     out = {k: st[k] for k in ("cwd", "first", "last", "branch", "ai", "custom",
                               "first_msg", "prompts", "ext_parent", "context")}
     out["days"] = dict(st["days"])
     out["uuids"] = frozenset(st["uuids"])
     out["tokens"] = st["total"] + st["msg_tokens"]
-    out["tdays"] = dict(st["tdays"])  # tokens per local day (the open message included)
-    base.add_day(out["tdays"], st["msg_day"], st["msg_tokens"])
+    # tokens per local day, the open message included; mids lets scan() count a message once
+    # when a forked talk copied it from its parent
+    out["tdays"], out["mids"] = dict(st["tdays"]), dict(st["mids"])
+    _spend(out["tdays"], out["mids"], st["msg"], st["msg_day"], st["msg_tokens"])
     return out
 
 
@@ -256,6 +267,17 @@ class Claude(Agent):
         for sid, _p, _n, info, _st in parsed:
             for u in info["uuids"]:
                 owner.setdefault(u, sid)
+        # a forked talk repeats its parent's messages: each message's tokens count in the
+        # earliest talk only
+        tdays, counted = {}, set()
+        for sid, _p, _n, info, _st in sorted(parsed, key=lambda p: (p[3]["first"] or "", p[0])):
+            own = dict(info["tdays"])
+            for mid, (day, n) in info["mids"].items():
+                if mid in counted:
+                    own[day] = own.get(day, 0) - n
+                else:
+                    counted.add(mid)
+            tdays[sid] = {d: n for d, n in own.items() if n > 0}
         talks = []
         for sid, path, projname, info, st in parsed:
             companion = path[:-6]
@@ -276,7 +298,7 @@ class Claude(Agent):
                 prompts=info["prompts"], days=info["days"], branch=info["branch"] or None,
                 size=st.st_size, agents=agents, path=path, related=related,
                 live=lv is not None, live_status=lv["status"] if lv else None,
-                context=info["context"], tokens=info["tokens"], tdays=info["tdays"]))
+                context=info["context"], tokens=info["tokens"], tdays=tdays[sid]))
         return talks
 
     def move(self, s, target):

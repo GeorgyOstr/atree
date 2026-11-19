@@ -49,5 +49,54 @@ class Accounts(unittest.TestCase):
         self.assertEqual(L.week_tokens(talks, today), {"claude": 12, "codex": 3})
 
 
+class Fixes(unittest.TestCase):
+    def setUp(self):
+        import json, shutil, tempfile
+        from unittest import mock
+        self.root = tempfile.mkdtemp(prefix="atree-acct-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.dir = os.path.join(self.root, ".claude1")
+        os.makedirs(self.dir)
+        with open(os.path.join(self.dir, ".credentials.json"), "w") as f:
+            json.dump({"claudeAiOauth": {"accessToken": "t", "refreshToken": "r",
+                                         "expiresAt": (NOW + 3600) * 1000}}, f)
+        p = mock.patch.object(claude_usage, "_cache", {})
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch("atree.statusline.limits", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_failed_call_backs_off_and_keeps_the_last_reply(self):
+        calls = []
+        ok = lambda token: calls.append(1) or {"seven_day": {"utilization": 10.0}}
+        def down(token):
+            calls.append(1)
+            raise OSError("offline")
+        first = claude_usage.account(self.dir, NOW, ok)
+        self.assertEqual(claude_usage.account(self.dir, NOW + claude_usage.TTL + 1, down), first)
+        self.assertEqual(len(calls), 2)
+        claude_usage.account(self.dir, NOW + claude_usage.TTL + 60, down)  # backing off: no call
+        self.assertEqual(len(calls), 2)
+
+    def test_a_copied_config_is_one_account(self):
+        import shutil
+        shutil.copytree(self.dir, os.path.join(self.root, ".claude-bak"))
+        reply = lambda token: {"seven_day": {"utilization": 1.0}}
+        with __import__("unittest").mock.patch.object(claude_usage, "_fetch", reply):
+            got = claude_usage.all_accounts(self.dir, NOW)
+        self.assertEqual([a["name"] for a in got], ["claude-bak"])
+
+    def test_credits_total_per_currency(self):
+        accounts = [{"name": "a", "bars": [], "credits": {"used": 1, "limit": 10, "currency": "EUR"}},
+                    {"name": "b", "bars": [], "credits": {"used": 0, "limit": 10, "currency": "USD"}}]
+        self.assertEqual(L.account_bars(accounts, NOW)[2]["text"], "9 EUR · $10")
+
+    def test_old_archived_talks_spread_tokens_over_prompt_days(self):
+        t = {"tool": "claude", "tokens": 300, "days": {"2026-11-18": 1, "2026-11-19": 2}}
+        self.assertEqual(L.token_days(t), {"2026-11-18": 100, "2026-11-19": 200})
+        self.assertEqual(L.token_days(dict(t, tdays={"2026-11-19": 5})), {"2026-11-19": 5})
+
+
 if __name__ == "__main__":
     unittest.main()

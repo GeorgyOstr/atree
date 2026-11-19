@@ -53,7 +53,7 @@ class Transcripts(HomeCase):
 
     def test_who_can(self):
         self.assertEqual(sorted(a.name for a in BY_NAME.values() if a.can_merge), ["claude", "codex"])
-        self.assertEqual(sorted(a.name for a in BY_NAME.values() if compress.can_compress(a)), ["claude", "codex"])
+        self.assertEqual(sorted(a.name for a in BY_NAME.values() if compress.can_compress(a)), ["claude"])
         self.assertEqual(BY_NAME["codex"].merged_id("x", "model: m\nsession id: 01a-b2\n--------\n"), "01a-b2")
         self.assertIsNone(BY_NAME["codex"].merged_id("x", "no banner"))
         self.assertEqual(BY_NAME["claude"].merged_id("x", ""), "x")

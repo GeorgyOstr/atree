@@ -802,7 +802,7 @@ class CompressTest(unittest.TestCase):
         b.setFilter("claude", True)
         b.apply_scan(self.talks + [S.talk("c", "/p", NOW, tool="codex")])
         b.reorderAgents(["codex", "claude"])
-        self.assertEqual(b.compressAgent["name"], "codex")
+        self.assertEqual(b.compressAgent["name"], "claude")  # Codex talks merge, Codex doesn't
         self.assertEqual(b.compressible("/p"), 3)
         self.assertEqual(self.spawned, [])
 

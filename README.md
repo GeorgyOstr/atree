@@ -26,8 +26,8 @@ Desktop Icons NG (the widget leaves its icons clickable). The widget needs GNOME
   instead (needs the GNOME extension on Wayland) or attached from tmux or screen, **move** Claude and Codex talks to another
   folder (their transcripts are rewritten, with a backup first), **archive** talks into
   verified `.tar.gz` files (undo for a few seconds; restore or delete later).
-- **Compress** a folder (the card's Compress button, or its menu): the leftmost agent that can
-  (Claude or Codex) looks through the Claude and Codex talks kept in that folder itself, not
+- **Compress** a folder (the card's Compress button, or its menu): Claude (run with no tools, so
+  nothing in a transcript can make it read files) looks through the Claude and Codex talks kept in that folder itself, not
   below it, picks the groups that belong together and writes each group one merged talk
   there, a hand-over written from their transcripts that you resume like any talk, named by
   the agent after what it read ("Merged 3: …"). The talks that went into it are archived. A

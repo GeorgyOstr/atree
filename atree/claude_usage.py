@@ -5,6 +5,7 @@ with the access token Claude Code saved for that account. atree never refreshes 
 would rotate it under Claude Code); once it has expired, the account's status-line data is used.
 """
 import glob
+import hashlib
 import json
 import os
 import threading
@@ -16,10 +17,11 @@ from .agents import base
 
 ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
 TTL = 180  # seconds between endpoint calls per account
+BACKOFF = 600  # after a failed call (offline, rate limited) wait this long before the next
 WINDOWS = (("five_hour", "session (5h)", 18000), ("seven_day", "week", 604800))
 
 _lock = threading.Lock()
-_cache = {}  # account dir -> (fetched at, result)
+_cache = {}  # account dir -> (checked at, result, fetched ok)
 
 
 def name_of(d):
@@ -27,10 +29,12 @@ def name_of(d):
 
 
 def account_dirs(default_dir):
-    """``default_dir`` plus every other ~/.claude* holding credentials or status-line data."""
+    """``default_dir`` plus its sibling .claude* dirs (~/.claude1, ...) holding credentials or
+    status-line data."""
     dirs = [default_dir]
     seen = {os.path.realpath(default_dir)}
-    for d in glob.glob(os.path.join(base.HOME, ".claude*")):
+    parent = os.path.dirname(os.path.normpath(default_dir))
+    for d in glob.glob(os.path.join(glob.escape(parent), ".claude*")):
         real = os.path.realpath(d)
         if real in seen or not os.path.isdir(d):
             continue
@@ -51,6 +55,16 @@ def _token(d, now):
     if type(exp) not in (int, float) or exp / 1000 < now + 60 or not isinstance(token, str):
         return None
     return token
+
+
+def _identity(d):
+    """Who an account's credentials belong to (a copy of a config dir is the same account)."""
+    try:
+        with open(os.path.join(d, ".credentials.json"), "rb") as f:
+            c = json.loads(f.read())["claudeAiOauth"]
+        return hashlib.sha256(str(c.get("refreshToken") or c.get("accessToken")).encode()).hexdigest()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def _fetch(token):
@@ -102,34 +116,44 @@ def from_statusline(saved, now):
     return bars
 
 
-def account(d, now, fetch=_fetch):
+def account(d, now, fetch=None):
     """One account's usage, or None when nothing is known about it."""
     with _lock:
         hit = _cache.get(d)
-    if hit and now - hit[0] < TTL:
+    if hit and now - hit[0] < (TTL if hit[2] else BACKOFF):
         return hit[1]
     token = _token(d, now)
     if token:
         try:
-            bars, credits = from_api(fetch(token), now)
+            bars, credits = from_api((fetch or _fetch)(token), now)
             result = {"name": name_of(d), "bars": bars, "credits": credits, "observed_at": now}
             with _lock:
-                _cache[d] = (now, result)
+                _cache[d] = (now, result, True)
             return result
         except Exception:  # offline, rate limited, changed reply: the status line still knows
             pass
+    # no fresh reply: whichever is newer, the status line or the last reply (credits only come
+    # from replies)
+    last = hit[1] if hit else None
     saved = statusline.limits(statusline.limits_path(d))
-    if not saved:
-        return None
-    last = hit[1].get("credits") if hit else None
-    return {"name": name_of(d), "bars": from_statusline(saved, now), "credits": last,
-            "observed_at": saved.get("at")}
+    result = last
+    if saved and (last is None or (saved.get("at") or 0) > (last.get("observed_at") or 0)):
+        result = {"name": name_of(d), "bars": from_statusline(saved, now),
+                  "credits": last.get("credits") if last else None, "observed_at": saved.get("at")}
+    if token and result is not None:  # the call failed: back off instead of retrying every poll
+        with _lock:
+            _cache[d] = (now, result, False)
+    return result
 
 
 def all_accounts(default_dir, now=None):
     now = time.time() if now is None else now
-    out = []
+    out, owners = [], set()
     for d in account_dirs(default_dir):
+        who = _identity(d)
+        if who is not None and who in owners:  # e.g. cp -r ~/.claude ~/.claude-bak
+            continue
+        owners.add(who)
         a = account(d, now)
         if a is not None:
             out.append(a)

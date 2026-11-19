@@ -315,11 +315,13 @@ def merge(a, folder, group):
             continue
         try:
             ops.archive(s["key"])
-            ops.annotate(s["key"], merged_into=key, merged_at=now)
+            ops.annotate(s["key"], merged_into=key, merged_at=time.time())
             done.append(s["key"])
             sources.append(_name(s))
         except Exception as e:
             errors.append(str(e) or type(e).__name__)
+            if s["key"] in ops.archived():  # indexed, but removing the original failed: undo must see it
+                ops.annotate(s["key"], merged_into=key, merged_at=time.time())
     # the agent has read the talks by now: its title says what they are better than the grouping's
     rep = report(out)
     title = rep["title"] or title
@@ -362,6 +364,11 @@ def compress(agent, folder, sessions=None, note=None):
         errors += m.pop("errors")
         merged.append(m)
     if merged:
+        # Undo's window starts when the whole compression is done, not when its first group was
+        end = time.time()
+        for m in merged:
+            for k in m["from"]:
+                ops.annotate(k, merged_at=end)
         _save_report(a, folder, merged, errors)
     return {"merged": merged, "errors": errors}
 

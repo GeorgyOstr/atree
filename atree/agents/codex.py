@@ -150,8 +150,9 @@ class Codex(Agent):
         return ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-"]
 
     def merge_argv(self, sid, name):
-        # Codex names the session itself and titles it by its first prompt
-        return ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "-"]
+        # Codex can't run without its shell tool, so text inside the transcripts it merges could
+        # make it read local files into the merged talk: Claude (no tools at all) merges instead
+        return []
 
     def merged_id(self, sid, err):
         m = _SESSION.search(err or "")

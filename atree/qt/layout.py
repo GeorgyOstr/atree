@@ -665,7 +665,7 @@ def activity_grid(talks, agents, today, metric="prompts"):
         tool = t.get("tool")
         if tool not in per:
             continue
-        for iso, n in (t.get(field) or {}).items():
+        for iso, n in (token_days(t) if field == "tdays" else t.get(field) or {}).items():
             if isinstance(n, (int, float)) and not isinstance(n, bool):
                 per[tool][iso] = per[tool].get(iso, 0) + int(n)
     weeks, peak = [], {n: 1 for n in names}
@@ -749,12 +749,26 @@ def short_number(n):
     return str(n)
 
 
+def token_days(t):
+    """Tokens per local day; talks archived before atree counted them per day spread their
+    total over their prompt days."""
+    td = t.get("tdays")
+    if isinstance(td, dict) and td:
+        return td
+    total, days = t.get("tokens"), t.get("days")
+    if not isinstance(total, (int, float)) or total <= 0 or not isinstance(days, dict):
+        return {}
+    counts = {d: n for d, n in days.items() if isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0}
+    whole = sum(counts.values())
+    return {d: int(total * n / whole) for d, n in counts.items()} if whole else {}
+
+
 def week_tokens(talks, today):
     """Tokens each agent spent over the last 7 days (today included), from the talks' per-day counts."""
     days = {(today - _dt.timedelta(days=i)).isoformat() for i in range(7)}
     out = {}
     for t in talks:
-        for iso, n in (t.get("tdays") or {}).items():
+        for iso, n in token_days(t).items():
             if iso in days and isinstance(n, (int, float)) and not isinstance(n, bool):
                 out[t.get("tool")] = out.get(t.get("tool"), 0) + int(n)
     return out
@@ -810,7 +824,7 @@ def account_bars(accounts, now):
     legend = [{"account": str(a.get("name") or ""), "slot": slot} for slot, a in enumerate(accounts)]
     # extra-usage credits: one graph of what is left (a series per account), the total left as text;
     # an account whose credits are off has none left
-    series, tips, left_sum, cur = [], [], 0.0, "USD"
+    series, tips, left_by = [], [], {}  # currency -> total left
     for slot, a in enumerate(accounts):
         c = a.get("credits")
         acct = str(a.get("name") or "")
@@ -824,10 +838,11 @@ def account_bars(accounts, now):
         left = max(0.0, limit - used)
         series.append({"slot": slot, "frac": left / limit if limit > 0 else 0.0})
         tips.append("%s: %s left (%s of %s spent)" % (acct, money(left, cur), money(used, cur), money(limit, cur)))
-        left_sum += left
+        left_by[cur] = left_by.get(cur, 0.0) + left
     credit = None
     if series:
-        credit = {"series": series, "full": left_sum <= 0, "text": money(round(left_sum, 2), cur),
+        text = " · ".join(money(round(v, 2), c) for c, v in sorted(left_by.items())) or money(0, "USD")
+        credit = {"series": series, "full": not any(v > 0 for v in left_by.values()), "text": text,
                   "tip": "extra-usage credits left this month\n" + "\n".join(tips)}
     return rows, legend, credit
 
