@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 import ui_support as S
-from atree import ops
+from atree import compress, ops
 from atree.qt import layout as L
 from atree.qt import tasks as tasks_mod
 
@@ -774,3 +774,138 @@ class IdleRescanTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompressTest(unittest.TestCase):
+    def setUp(self):
+        self.b = backend()
+        self.b.collector = lambda: ([], [])
+        self.talks = [S.talk("one", "/p", NOW), S.talk("two", "/p", NOW), S.talk("deep", "/p/sub", NOW),
+                      S.talk("g", "/p", NOW, tool="gemini"), S.talk("solo", "/q", NOW)]
+        self.b.apply_scan(self.talks)
+        self.rec = Recorder(self.b)
+        self.states = []
+        self.b.compressChanged.connect(lambda: self.states.append(dict(self.b.compressState)))
+        self.spawned = []
+        self.b._spawn = lambda fn, done, *args: self.spawned.append((fn, done, args))
+        self.refreshes = []
+        self.b.refresh = lambda: self.refreshes.append(1)
+
+    def test_who_and_what(self):
+        b = self.b
+        self.assertEqual(b.compressAgent, {"name": "claude", "label": "Claude"})
+        self.assertEqual((b.compressible("/p"), b.compressible("/q"), b.compressible("/p/sub")), (2, 1, 1))
+        b.setFilter("claude", False)        # gemini is shown but can't merge talks
+        self.assertEqual(b.compressAgent, {})
+        b.compressFolder("/p")
+        self.assertEqual(self.rec.toasts, [("no agent here can compress talks", True)])
+        b.setFilter("claude", True)
+        b.apply_scan(self.talks + [S.talk("c", "/p", NOW, tool="codex")])
+        b.reorderAgents(["codex", "claude"])
+        self.assertEqual(b.compressAgent["name"], "codex")
+        self.assertEqual(b.compressible("/p"), 3)
+        self.assertEqual(self.spawned, [])
+
+    def test_compress_runs_once_and_reports(self):
+        b = self.b
+        b.compressFolder("/q")
+        self.assertEqual(self.rec.toasts, [("fewer than two talks to compress in /q", True)])
+        b.compressFolder("/p")
+        self.assertEqual(b.compressState, {"/p": "busy"})
+        [(fn, done, args)] = self.spawned
+        self.assertIs(fn, b.compressor)
+        self.assertEqual((args[0], args[1], [t["key"] for t in args[2]]), ("claude", "/p", ["claude:one", "claude:two"]))
+        b.compressFolder("/p")
+        b.undoCompress("/p")
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(self.rec.toasts[1:], [("still working on /p", True)])
+        self.rec.reset()
+        done({"merged": [{"key": "claude:m", "title": "T", "from": ["claude:one", "claude:two"]}], "errors": []})
+        self.assertEqual(self.rec.toasts, [("merged 2 talks into 1 · the folder's Undo takes it back for 10 min", False)])
+        self.assertEqual((b.compressState, self.refreshes, b._after_op), ({}, [1], True))
+        self.assertEqual(self.states, [{"/p": "busy"}, {"/p": "busy"}, {}])
+        self.assertEqual(b.compressReport, {
+            "agent": "Claude", "folder": "/p", "path": "/p", "talks": 2, "errors": [], "items": [
+                {"key": "claude:m", "tool": "claude", "title": "T", "brief": "", "lessons": [], "sources": []}]})
+        for result, toast in (
+                ({"merged": [], "errors": []}, ("Claude found no talks that belong together", False)),
+                ({"merged": [], "errors": ["e1"]}, ("nothing was merged\ne1", True)),
+                (ops.OpError("Claude failed: x"), ("Claude failed: x", True))):
+            self.rec.reset()
+            b.compressFolder("/p")
+            self.spawned[-1][1](result)
+            self.assertEqual(self.rec.toasts, [toast])
+            self.assertEqual(b.compressState, {})
+        self.assertEqual(b.compressReport["items"][0]["key"], "claude:m")  # the last one that merged stays up
+        b.clearCompressReport()
+        b.clearCompressReport()
+        self.assertEqual((b.compressReport, len(self.states)), ({}, 10))
+
+    def test_report_says_what_changed_and_goes_with_an_undo(self):
+        b = self.b
+        b.compressFolder("/p")
+        self.spawned[0][1]({"errors": ["'x' changed meanwhile"], "merged": [
+            {"key": "codex:m", "title": "T", "name": "Merged 2: T", "from": ["claude:one", "claude:two"],
+             "sources": ["one", "two"], "brief": "B", "lessons": ["L"]}]})
+        r = b.compressReport
+        self.assertEqual((r["errors"], r["items"]), (["'x' changed meanwhile"], [
+            {"key": "codex:m", "tool": "codex", "title": "T", "brief": "B", "lessons": ["L"], "sources": ["one", "two"]}]))
+        old = [S.talk(k, "/p", NOW, archived=True, merged_into="codex:m", merged_at=NOW) for k in ("one", "two")]
+        b.apply_scan(old + [S.talk("far", "/q", NOW, archived=True, merged_into="claude:n", merged_at=NOW)])
+        b.undoCompress("/q")
+        self.spawned[-1][1]({"restored": ["claude:far"], "dropped": [], "errors": []})
+        self.assertTrue(b.compressReport)       # another folder's undo leaves it
+        b.undoCompress("/p")
+        self.spawned[-1][1](ops.OpError("no"))
+        self.assertTrue(b.compressReport)
+        b.undoCompress("/p")
+        self.spawned[-1][1]({"restored": ["claude:one", "claude:two"], "dropped": ["codex:m"], "errors": []})
+        self.assertEqual(b.compressReport, {})
+
+    def test_a_compression_run_elsewhere_reports_here(self):
+        b = self.b
+        self.addCleanup(compress.forget_report)
+        item = {"key": "claude:m", "tool": "claude", "title": "T", "brief": "B", "lessons": [], "sources": ["one"]}
+
+        def save(at):
+            os.makedirs(ops.DATA, exist_ok=True)
+            with open(compress._report_file(), "w") as f:
+                json.dump({"at": at, "agent": "Codex", "path": "/p", "talks": 2, "errors": [], "items": [item]}, f)
+
+        save(NOW - compress.UNDO_WINDOW - 1)        # an old one, as at start-up: not shown
+        b.apply_scan(self.talks)
+        self.assertEqual(b.compressReport, {})
+        save(NOW - 5)
+        b.apply_scan(self.talks)
+        self.assertEqual((b.compressReport["agent"], b.compressReport["folder"], b.compressReport["items"]),
+                         ("Codex", "/p", [item]))
+        n = len(self.states)
+        b.apply_scan(self.talks)
+        self.assertEqual(len(self.states), n)       # seen once
+        b.clearCompressReport()
+        self.assertEqual((b.compressReport, compress.last_report()), ({}, None))
+        b.apply_scan(self.talks)
+        self.assertEqual(b.compressReport, {})
+        save(NOW - 4)
+        b.apply_scan(self.talks)
+        self.assertTrue(b.compressReport)
+        compress.forget_report("/p")                # undone from the command line
+        b.apply_scan(self.talks)
+        self.assertEqual(b.compressReport, {})
+
+    def test_undo_shows_for_a_while(self):
+        b = self.b
+        old = [S.talk(k, "/p", NOW, archived=True, merged_into="claude:m", merged_at=NOW - 60) for k in ("one", "two")]
+        b.undoCompress("/p")                # nothing to undo yet
+        b.apply_scan([S.talk("m", "/p", NOW), self.talks[2]] + old + [S.talk("x", "/q", NOW, archived=True)])
+        self.assertEqual(b.compressState, {"/p": "undo"})
+        b.undoCompress("/p")
+        [(fn, done, args)] = self.spawned
+        self.assertIs(fn, b.uncompressor)
+        self.assertEqual((args, b.compressState), (("/p",), {"/p": "busy"}))
+        done({"restored": ["claude:one", "claude:two"], "dropped": ["claude:m"], "errors": []})
+        self.assertEqual(self.rec.toasts, [("restored 2 talk(s)", False)])
+        self.assertEqual(b.compressState, {"/p": "undo"})   # until the next scan sees them restored
+        b._test_clock.advance(540)
+        b.apply_scan(list(b.talks))
+        self.assertEqual(b.compressState, {})               # the 10 minutes are over

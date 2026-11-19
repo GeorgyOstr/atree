@@ -58,23 +58,19 @@ def _last_line(text):
     return lines[-1].strip() if lines else ""
 
 
-def search(agent, query, sessions):
-    a = BY_NAME.get(agent)
-    if a is None:
-        raise OpError("unknown agent '%s'" % agent)
-    candidates = [s for s in sessions if not s.get("archived")]
-    argv = a.ask_argv()
-    if argv is None:
-        raise OpError("%s can't answer questions headless" % a.label)
-    os.makedirs(SEARCH_DIR, exist_ok=True)
+def ask(a, argv, prompt, cwd=None, timeout=TIMEOUT):
+    """Run agent ``a``'s headless ``argv`` on ``prompt``; (stdout, stderr) of a clean exit."""
+    if cwd is None:
+        cwd = SEARCH_DIR
+        os.makedirs(cwd, exist_ok=True)
     try:
-        proc = subprocess.Popen(argv, cwd=SEARCH_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, encoding="utf-8",
                                 errors="replace", start_new_session=True)
     except FileNotFoundError:
         raise OpError("%s not found" % argv[0]) from None
     try:
-        out, err = proc.communicate(build_prompt(query, candidates), timeout=TIMEOUT)
+        out, err = proc.communicate(prompt, timeout=timeout)
     except BaseException as e:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -86,11 +82,23 @@ def search(agent, query, sessions):
             pass
         proc.wait()
         if isinstance(e, subprocess.TimeoutExpired):
-            raise OpError("%s took longer than %ds" % (a.label, TIMEOUT)) from None
+            raise OpError("%s took longer than %ds" % (a.label, timeout)) from None
         raise
     if proc.returncode:
         reason = _last_line(err) or _last_line(out) or "exit code %d" % proc.returncode
         raise OpError("%s failed: %s" % (a.label, reason))
+    return out, err
+
+
+def search(agent, query, sessions):
+    a = BY_NAME.get(agent)
+    if a is None:
+        raise OpError("unknown agent '%s'" % agent)
+    candidates = [s for s in sessions if not s.get("archived")]
+    argv = a.ask_argv()
+    if argv is None:
+        raise OpError("%s can't answer questions headless" % a.label)
+    out, _err = ask(a, argv, build_prompt(query, candidates))
     items = parse_answer(out)
     if items is None:
         raise OpError("%s: the agent didn't answer with a list" % a.label)

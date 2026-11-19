@@ -99,6 +99,16 @@ def move(key, target):
         return target
 
 
+def rename(key, title):
+    title = " ".join(str(title or "").split())
+    if not title:
+        raise OpError("a talk needs a name")
+    with op_lock():
+        s = _find(key)
+        _agent(s["tool"]).rename(s, title)
+    return title
+
+
 # ---------------------------------------------------------------- archive
 
 def _snapshot(base_dir, members):
@@ -162,13 +172,15 @@ def _remove(path):
             pass
 
 
-def archive(key):
+def archive(key, idle=False):
+    """Pack talk ``key`` away. ``idle``: the caller checked that no process runs it, so a
+    talk that only looks live (some agents go by how recently the file changed) may go."""
     with op_lock():
         s = _find(key)
         agent = _agent(s["tool"])
         if not agent.can_archive:
             raise OpError("archiving %s talks isn't supported" % agent.label)
-        if s["live"]:
+        if s["live"] and not idle:
             raise OpError("'%s' is running; close it before archiving" % s["title"])
         index = archived()
         if key in index:
@@ -212,6 +224,15 @@ def archive(key):
         except OSError as e:
             raise OpError("archived %s to %s, but removing the originals failed: %s" % (key, out, e)) from e
         return out
+
+
+def annotate(key, **fields):
+    """Note ``fields`` on an archived talk's index entry."""
+    with op_lock():
+        index = archived()
+        if isinstance(index.get(key), dict):
+            index[key].update(fields)
+            _save(ARCHIVE_INDEX, index)
 
 
 # ---------------------------------------------------------------- restore

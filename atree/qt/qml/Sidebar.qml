@@ -41,6 +41,12 @@ Flickable {
         width: activity.width
         spacing: 10
 
+        MergePanel {
+            id: mergePanel
+            width: activity.width
+            limit: Math.max(170, Math.min(320, bar.room * 0.45))
+            onVisibleChanged: if (visible) bar.offset = 0
+        }
         AiPanel {
             id: aiPanel
             width: activity.width

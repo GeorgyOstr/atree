@@ -143,12 +143,18 @@ ApplicationWindow {
     }
 
     function openFolderMenu(path, item, px, py) {
+        var squeeze = backend.compressState[path] || ""
+        var merger = backend.compressAgent
         folderMenu.popupAt(item, px, py, backend.tildify(path), [
             { text: "Unfold everything inside", run: function () { backend.setAllUnder(path, false) } },
             { text: "Fold everything inside", run: function () { backend.setAllUnder(path, true) } },
             { text: "Select all talks here", run: function () { backend.selectFolder(path) } },
             { text: "Open in file manager", run: function () { backend.openFolder(path) } },
-            { text: "Copy path", run: function () { backend.copyText(path) } }
+            { text: "Copy path", run: function () { backend.copyText(path) } },
+            { text: "Compress related talks with " + merger.label,
+              visible: merger.name !== undefined && squeeze === "" && backend.compressible(path) > 1,
+              run: function () { backend.compressFolder(path) } },
+            { text: "Undo compress", visible: squeeze === "undo", run: function () { backend.undoCompress(path) } }
         ])
     }
 

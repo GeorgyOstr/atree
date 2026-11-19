@@ -13,11 +13,13 @@ from .base import Agent, OpError
 CODEX_DIR = base._env("CODEX_HOME", os.path.join(base.HOME, ".codex"))
 CODEX_SESSIONS = os.path.join(CODEX_DIR, "sessions")
 CODEX_DB = os.path.join(CODEX_DIR, "state_5.sqlite")
+CODEX_NAMES = os.path.join(CODEX_DIR, "session_index.jsonl")
 
 LIVE_WINDOW = 180
 META_KEYS = ("id", "cwd", "timestamp", "forked_from_id", "parent_thread_id", "git")
 _TS = re.compile(rb'"timestamp":"((?:[^"\\]|\\.)*)"')
 _LAST = re.compile(rb'"last_token_usage":\{[^{}]*?"total_tokens":(\d+)')
+_SESSION = re.compile(r"^session id: ([\w-]+)\s*$", re.M)
 _TOTAL = re.compile(rb'"total_token_usage":\{[^{}]*?"total_tokens":(\d+)')
 
 
@@ -137,6 +139,7 @@ class Codex(Agent):
     label = "Codex"
     color = "#5b8cff"
     can_move = True
+    can_merge = True
     new_command = "codex"
     continue_command = "codex resume --last"
 
@@ -145,6 +148,49 @@ class Codex(Agent):
 
     def ask_argv(self):
         return ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-"]
+
+    def merge_argv(self, sid, name):
+        # Codex names the session itself and titles it by its first prompt
+        return ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "-"]
+
+    def merged_id(self, sid, err):
+        m = _SESSION.search(err or "")
+        return m.group(1) if m else None
+
+    def rename(self, s, title):
+        try:
+            _update_index("UPDATE threads SET title = ? WHERE id = ?", (title, s["id"]))
+        except sqlite3.Error as e:
+            raise OpError("Codex's thread index couldn't be updated (%s)" % e) from e
+        if os.path.exists(CODEX_NAMES):  # the names Codex's own resume list shows; the last one counts
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000000Z"
+            line = json.dumps({"id": s["id"], "thread_name": title, "updated_at": stamp}, separators=(",", ":"))
+            try:
+                with open(CODEX_NAMES, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass
+
+    def transcript(self, s):
+        out = []
+        with open(s["path"], "rb") as f:
+            for line in f:
+                if b'"response_item"' not in line or b'"message"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                p = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "response_item" else None
+                if not isinstance(p, dict) or p.get("type") != "message" or p.get("role") not in ("user", "assistant"):
+                    continue
+                text = base.all_text(p.get("content")).strip()
+                if p["role"] == "assistant":
+                    if text:
+                        out.append(("agent", text))
+                elif text and not text.startswith("<"):  # <environment_context> and the like
+                    out.append(("user", text))
+        return out
 
     def scan(self):
         if not os.path.isdir(CODEX_SESSIONS):

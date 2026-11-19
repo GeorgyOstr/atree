@@ -9,6 +9,8 @@ Item {
     readonly property bool folded: node.collapsed
     readonly property bool hovered: hover.hovered
     readonly property bool headHovered: headHover.hovered
+    // "busy" while an agent merges this folder's related talks, "undo" while that can be taken back
+    readonly property string squeeze: backend.compressState[path] || ""
 
     x: node.nx
     y: node.ny
@@ -98,7 +100,10 @@ Item {
                 color: Theme.text
                 elide: Text.ElideMiddle
                 // hovering adds the ▶ button on the right; leave it room
-                width: Math.min(implicitWidth, Theme.cardW - 135 - (card.node.live > 0 ? 85 : 0) - (card.headHovered ? 26 : 0))
+                width: Math.min(implicitWidth, Theme.cardW - 135 - (card.node.live > 0 ? 85 : 0) - (card.headHovered ? 26 : 0)
+                                               - (squeezeNote.visible ? squeezeNote.width : 0)
+                                               - (squeezeBtn.visible ? squeezeBtn.width + 4 : 0)
+                                               - (unsqueezeBtn.visible ? unsqueezeBtn.width + 4 : 0))
                 anchors.verticalCenter: parent.verticalCenter
             }
             Text {
@@ -131,11 +136,41 @@ Item {
             spacing: 4
             Text {
                 objectName: "cardAge"
-                visible: !card.headHovered
+                visible: !card.headHovered && card.squeeze !== "busy"
                 text: card.node.age
                 font.pixelSize: 11
                 color: Theme.dim
                 anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                id: squeezeNote
+                objectName: "cardSqueezeNote"
+                visible: card.squeeze === "busy"
+                text: card.folded ? "✦" : "✦ compressing…"
+                font.pixelSize: 11
+                color: Theme.accent
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            MiniButton {
+                id: squeezeBtn
+                objectName: "cardSqueeze"
+                visible: card.headHovered && !card.folded && card.squeeze === ""
+                         && backend.compressAgent.name !== undefined && card.node.talks > 1
+                text: "Compress"
+                textColor: Theme.text
+                tip: "Let " + backend.compressAgent.label + " merge the related talks of this folder\n"
+                     + "into one talk per group; the talks that went into it are archived"
+                onClicked: backend.compressFolder(card.path)
+            }
+            MiniButton {
+                id: unsqueezeBtn
+                objectName: "cardUnsqueeze"
+                visible: !card.folded && card.squeeze === "undo"
+                text: "↶ Undo"
+                textColor: Theme.accent
+                tip: "Undo the compression: restore the archived talks\n"
+                     + "and drop the talk they were merged into"
+                onClicked: backend.undoCompress(card.path)
             }
             MiniButton {
                 visible: card.headHovered && card.node.mode !== "full" && card.node.count > 6
@@ -181,6 +216,18 @@ Item {
         model: backend.cardModel(card.path)
         delegate: TalkRow {}
         readonly property bool overflowing: contentHeight > height + 1
+        // where the rows start and end: a ListView moves its origin when rows above the view go,
+        // and a view left outside these bounds shows nothing
+        readonly property real minY: originY
+        readonly property real maxY: originY + Math.max(0, contentHeight - height)
+        function clampY() {
+            if (contentY < minY)
+                contentY = minY
+            else if (contentY > maxY)
+                contentY = maxY
+        }
+        onMinYChanged: clampY()
+        onMaxYChanged: clampY()
         Behavior on contentY {
             id: glide
             enabled: false
@@ -203,8 +250,7 @@ Item {
             }
             var touch = wheel.phase !== Qt.NoScrollPhase && wheel.pixelDelta.y !== 0
             var dy = touch ? wheel.pixelDelta.y : wheel.angleDelta.y / 120 * 3 * Theme.rowH
-            var maxY = list.contentHeight - list.height
-            var to = Math.max(0, Math.min(maxY, list.contentY - dy))
+            var to = Math.max(list.minY, Math.min(list.maxY, list.contentY - dy))
             if (Math.abs(to - list.contentY) < 0.5) {
                 wheel.accepted = false
                 return

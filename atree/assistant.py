@@ -153,9 +153,39 @@ def open_terminal(agent, sessions):
     ops.run_in_terminal(AGENT_DIR, a.continue_command if resumable else a.new_command)
 
 
+def _compress_cli(cmd, rest):
+    from . import compress
+    if not rest or len(rest) > (2 if cmd == "compress" else 1):
+        print("usage: --op compress FOLDER [AGENT] | --op uncompress FOLDER")
+        return 2
+    folder = os.path.abspath(os.path.expanduser(rest[0]))
+    try:
+        if cmd == "uncompress":
+            r = compress.undo(folder)
+            print("restored %d talk(s), dropped %d merged talk(s)" % (len(r["restored"]), len(r["dropped"])))
+        else:
+            agent = rest[1] if len(rest) > 1 else next(
+                (a.name for a in BY_NAME.values() if compress.can_compress(a)), "")
+            r = compress.compress(agent, folder, note=print)
+            for m in r["merged"]:
+                print("merged %d talks into %s: %s" % (len(m["from"]), m["key"], m["name"]))
+                for line in [m["brief"]] + ["lesson: " + l for l in m["lessons"]]:
+                    if line:
+                        print("    " + line)
+            if not r["merged"] and not r["errors"]:
+                print("no talks belong together")
+    except OpError as e:
+        print("%s %s: FAILED %s" % (cmd, folder, e))
+        return 1
+    for e in r["errors"]:
+        print("FAILED %s" % e)
+    return 1 if r["errors"] else 0
+
+
 def cli(args):
     if not args:
-        print("usage: atree.py --op archive|restore|delete|move FOLDER|task TEXT|tree ...")
+        print("usage: atree.py --op archive|restore|delete|move FOLDER|task TEXT|tree"
+              "|compress FOLDER [AGENT]|uncompress FOLDER ...")
         return 2
     cmd, rest = args[0], list(args[1:])
     if cmd == "tree":
@@ -175,6 +205,8 @@ def cli(args):
             ops._save(ops.TASKS_FILE, tasks)
         print("task added")
         return 0
+    if cmd in ("compress", "uncompress"):
+        return _compress_cli(cmd, rest)
     if cmd == "move":
         if len(rest) < 2:
             print("usage: --op move FOLDER KEY...")

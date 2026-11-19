@@ -520,5 +520,147 @@ class InteractionTest(unittest.TestCase):
         v.close()
 
 
+class CompressTest(unittest.TestCase):
+    def test_card_button_busy_note_undo_and_menu(self):
+        b = S.make_backend()
+        b.setFilter("age", 0)
+        talks = [S.talk("a", "/w/b", NOW), S.talk("b", "/w/b", NOW), S.talk("c", "/w/c", NOW)]
+        b.apply_scan(talks)
+        spawned = []
+        b._spawn = lambda fn, done, *args: spawned.append((fn, done, args))
+        b.refresh = lambda: None
+        v = S.View(b)
+        self.addCleanup(v.close)
+        S.pump(300)
+        card = item_for(v, "card", "/w/b")
+        btn, undo, note = (child(card, n) for n in ("cardSqueeze", "cardUnsqueeze", "cardSqueezeNote"))
+        age, label = child(card, "cardAge"), child(card, "cardHeadRow").childItems()[1]
+        self.assertEqual([i.isVisible() for i in (btn, undo, note, age)], [False, False, False, True])
+        r = srect(card)
+        S.mouse_move(v.win, r.x() + 60, r.y() + 12)     # over the header: the button shows
+        S.pump(50)
+        self.assertTrue(btn.isVisible())
+        self.assertFalse(child(item_for(v, "card", "/w/c"), "cardSqueeze").isVisible())  # one talk there
+        self.assertLess(srect(label).right(), srect(btn).left())
+        S.click(v.win, srect(btn).center().x(), srect(btn).center().y())
+        S.pump(50)
+        self.assertEqual((b.compressState, len(spawned)), ({"/w/b": "busy"}, 1))
+        self.assertEqual([i.isVisible() for i in (btn, undo, note, age)], [False, False, True, False])
+        self.assertEqual(note.property("text"), "✦ compressing…")
+        # done: its two talks are archived into a new one, and Undo stays up without hovering
+        old = [dict(t, archived=True, merged_into="claude:m", merged_at=NOW) for t in talks[:2]]
+        b.apply_scan([S.talk("m", "/w/b", NOW, title="Merged: x"), S.talk("n", "/w/b", NOW), talks[2]] + old)
+        spawned[0][1]({"merged": [{"key": "claude:m", "title": "x", "from": ["claude:a", "claude:b"]}], "errors": []})
+        S.mouse_move(v.win, 5, 5)
+        S.pump(300)
+        card = item_for(v, "card", "/w/b")
+        btn, undo, note = (child(card, n) for n in ("cardSqueeze", "cardUnsqueeze", "cardSqueezeNote"))
+        self.assertEqual([i.isVisible() for i in (btn, undo, note)], [False, True, False])
+        self.assertIn("merged 2 talks into 1", v.find("toastText").property("text"))
+        # the folder menu offers the same two actions
+        menu = v.find("folderMenu")
+
+        def shown():
+            S.call(v.win, "openFolderMenu", "/w/b", v.win.contentItem(), 100, 100)
+            S.pump(150)
+            texts = [e.property("modelData")["text"] for e in children(menu.property("contentItem"), "menuEntry")
+                     if e.isVisible()]
+            QTest.keyClick(v.win, Qt.Key_Escape)
+            S.pump(150)
+            self.assertEqual(len(texts), 6)     # the five folder actions and one of ours
+            return [t for t in texts if "ompress" in t]
+
+        self.assertEqual(shown(), ["Undo compress"])
+        S.click(v.win, srect(undo).center().x(), srect(undo).center().y())
+        S.pump(50)
+        self.assertIs(spawned[1][0], b.uncompressor)
+        self.assertEqual(spawned[1][2], ("/w/b",))
+        b._test_clock.advance(601)
+        spawned[1][1]({"restored": ["claude:a", "claude:b"], "dropped": ["claude:m"], "errors": []})
+        b.apply_scan(talks + [S.talk("n", "/w/b", NOW)])
+        S.pump(300)
+        self.assertEqual(b.compressState, {})
+        self.assertEqual(shown(), ["Compress related talks with Claude"])
+        self.assertEqual(v.all_warnings(), [])
+
+    def test_a_scrolled_card_keeps_showing_rows_when_most_of_them_go(self):
+        b = S.make_backend()
+        b.setFilter("age", 0)
+        talks = [S.talk("t%02d" % i, "/w/b", NOW - i) for i in range(47)]
+        b.apply_scan(talks)
+        b.setCardMode("/w/b", "compact")
+        v = S.View(b)
+        self.addCleanup(v.close)
+        S.pump(300)
+        rows = child(item_for(v, "card", "/w/b"), "rowList")
+        rows.setProperty("contentY", rows.property("contentHeight") - rows.height())
+        S.pump(100)
+        b.apply_scan(talks[:3] + talks[20:35])      # as after a compression: many rows above the view are gone
+        S.pump(400)
+        rows = child(item_for(v, "card", "/w/b"), "rowList")
+        r = srect(rows)
+
+        def showing():
+            return len([x for x in children(rows, "talkRow")
+                        if x.isVisible() and srect(x).bottom() > r.top() + 1 and srect(x).top() < r.bottom() - 1])
+
+        self.assertGreaterEqual(showing(), 4)
+        for step in (120, -120, -120, 120 * 40, -120 * 40):  # and the wheel can't leave them behind
+            S.wheel(v.win, r.center().x(), r.center().y(), dy=step)
+            S.pump(300)
+            self.assertGreaterEqual(showing(), 4, step)
+            y = rows.property("contentY")
+            self.assertTrue(rows.property("minY") - 0.5 <= y <= rows.property("maxY") + 0.5)
+        self.assertEqual(v.all_warnings(), [])
+
+    def test_report_panel_says_what_changed_then_lessons_while_they_fit(self):
+        b = S.make_backend()
+        b.setFilter("age", 0)
+        b.apply_scan([S.talk("m", "/w/b", NOW, title="Merged 2: Login cookie fix"), S.talk("n", "/w/b", NOW)])
+        b.refresh = lambda: None
+        v = S.View(b)
+        self.addCleanup(v.close)
+        S.pump(200)
+        panel = v.find("mergePanel")
+        self.assertEqual((panel.isVisible(), panel.height()), (False, 0))
+        b.compress_done("Claude", {"errors": [], "merged": [{
+            "key": "claude:m", "title": "Login cookie fix", "name": "Merged 2: Login cookie fix",
+            "from": ["claude:a", "claude:b"], "sources": ["fix the login", "login breaks again"],
+            "brief": "The cookie path was wrong and is fixed. " * 6,
+            "lessons": ["Clear the cookies before testing the login. " * 4, "Next: add a logout test."]}]}, "/w/b")
+        S.pump(200)
+        self.assertTrue(panel.isVisible())
+        text = lambda name: child(panel, name).property("text")  # noqa: E731
+        self.assertEqual(text("mergeHead"), "✦ Claude merged 2 talks into 1 · /w/b")
+        self.assertEqual(text("mergeTitle"), "Login cookie fix")
+        self.assertEqual(text("mergeSources"), "← fix the login  ·  login breaks again")
+        brief, lessons, body = child(panel, "mergeBrief"), child(panel, "mergeLessons"), child(panel, "mergeLessonsText")
+        self.assertEqual(brief.property("lineCount"), 2)        # brief stays brief
+        self.assertTrue(lessons.isVisible())
+        self.assertTrue(body.property("text").startswith("• Clear the cookies"))
+        self.assertIn("\n• Next: add a logout test.", body.property("text"))
+        self.assertLessEqual(panel.height(), panel.property("limit"))
+        full = body.property("lineCount")
+        panel.setProperty("limit", panel.height() - 20)          # less room: fewer lines of lessons
+        S.pump(50)
+        self.assertLess(body.property("lineCount"), full)
+        self.assertLessEqual(panel.height(), panel.property("limit"))
+        panel.setProperty("limit", 60)                           # none: only what changed
+        S.pump(50)
+        self.assertFalse(lessons.isVisible())
+        self.assertTrue(child(panel, "mergeTitle").isVisible())
+        r = srect(child(panel, "mergeItem"))
+        S.click(v.win, r.center().x(), r.center().y())
+        S.pump(50)
+        self.assertEqual(b.selection, {"claude:m"})
+        b.clearSelection()                                       # its details lie over the sidebar
+        S.pump(200)
+        r = srect(child(panel, "mergeClear"))
+        S.click(v.win, r.center().x(), r.center().y())
+        S.pump(50)
+        self.assertEqual((b.compressReport, panel.isVisible()), ({}, False))
+        self.assertEqual(v.all_warnings(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

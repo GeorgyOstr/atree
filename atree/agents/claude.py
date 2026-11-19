@@ -43,6 +43,19 @@ def _loads(line):
         return None
 
 
+def _prompt(line):
+    """(record, text) when the line holds a prompt the user typed, else (None, "")."""
+    if b'"type":"user"' not in line or b'"tool_result"' in line or b'"isMeta":true' in line:
+        return None, ""
+    rec = _loads(line)
+    if not isinstance(rec, dict) or rec.get("type") != "user" or rec.get("isSidechain"):
+        return None, ""
+    text = base.message_text(rec.get("message")).strip()
+    if not text or text.startswith("<"):
+        return None, ""
+    return rec, text
+
+
 def _init():
     return {"cwd": None, "first": None, "last": None, "branch": None, "ai": None,
             "custom": None, "first_msg": None, "prompts": 0, "uuids": set(),
@@ -98,13 +111,8 @@ def _step(st, line):
             if rec.get("aiTitle"):
                 st["ai"] = rec["aiTitle"]
         return
-    if b'"type":"user"' in line and b'"tool_result"' not in line and b'"isMeta":true' not in line:
-        rec = _loads(line)
-        if not isinstance(rec, dict) or rec.get("type") != "user" or rec.get("isSidechain"):
-            return
-        text = base.message_text(rec.get("message")).strip()
-        if not text or text.startswith("<"):
-            return
+    rec, text = _prompt(line)
+    if rec:
         st["prompts"] += 1
         base.count_day(st["days"], rec.get("timestamp"))
         if st["first_msg"] is None:
@@ -180,6 +188,7 @@ class Claude(Agent):
     label = "Claude"
     color = "#da724b"
     can_move = True
+    can_merge = True
     new_command = "claude"
     continue_command = "claude --continue"
 
@@ -191,6 +200,40 @@ class Claude(Agent):
 
     def ask_argv(self):
         return ["claude", "-p", "--no-session-persistence", "--model", "haiku"]
+
+    def merge_argv(self, sid, name):
+        # no tools of any kind, MCP servers included: it only writes
+        return ["claude", "-p", "--session-id", sid, "--name", name, "--strict-mcp-config", "--tools", ""]
+
+    def rename(self, s, title):
+        # what Claude Code's own /rename leaves in the transcript; the last one counts
+        rec = json.dumps({"type": "custom-title", "customTitle": title, "sessionId": s["id"]},
+                         separators=(",", ":"))
+        try:
+            with open(s["path"], "rb+") as f:
+                end = f.seek(0, 2)
+                if end:
+                    f.seek(end - 1)
+                    if f.read(1) != b"\n":
+                        rec = "\n" + rec
+                f.write((rec + "\n").encode())
+        except OSError as e:
+            raise OpError("can't rename '%s': %s" % (s["title"], e)) from e
+
+    def transcript(self, s):
+        out = []
+        with open(s["path"], "rb") as f:
+            for line in f:
+                rec, text = _prompt(line)
+                if rec:
+                    out.append(("user", text))
+                elif b'"type":"assistant"' in line and b'"isSidechain":true' not in line:
+                    rec = _loads(line)
+                    msg = rec.get("message") if isinstance(rec, dict) and rec.get("type") == "assistant" else None
+                    text = base.all_text(msg.get("content")).strip() if isinstance(msg, dict) else ""
+                    if text:
+                        out.append(("agent", text))
+        return out
 
     def scan(self):
         if not os.path.isdir(CLAUDE_PROJECTS):

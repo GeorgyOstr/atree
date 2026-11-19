@@ -30,6 +30,7 @@ class Agent:
     color = "#8a93a6"
     can_move = False
     can_archive = True
+    can_merge = False  # transcript() reads its talks, so compressing a folder can merge them
     new_command = None
     continue_command = None
 
@@ -45,6 +46,22 @@ class Agent:
 
     def ask_argv(self):
         return None
+
+    def transcript(self, s):
+        """[(``"user"`` | ``"agent"``, text)]: what was typed and answered in talk ``s``, in order."""
+        return []
+
+    def merge_argv(self, sid, name):
+        """A headless run that keeps its session (prompt on stdin, answer on stdout) under the
+        id ``sid`` and title ``name`` where the CLI lets us choose them, or None."""
+        return None
+
+    def merged_id(self, sid, err):
+        """The id of the session that run made; ``err`` is what it wrote to stderr."""
+        return sid
+
+    def rename(self, s, title):
+        raise OpError("renaming %s talks isn't supported" % self.label)
 
     def move(self, s, target):
         raise OpError("moving %s sessions isn't supported" % self.label)
@@ -119,6 +136,16 @@ def message_text(msg):
                 text = part.get("text")
                 return text if isinstance(text, str) else ""
     return ""
+
+
+def all_text(content):
+    """Every text part of a message's content, joined."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = [p.get("text") for p in content if isinstance(p, dict)]
+    return "\n".join(t for t in parts if isinstance(t, str) and t.strip())
 
 
 def count_day(days, iso_ts):

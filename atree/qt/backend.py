@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import Property, QObject, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QFont, QFontMetricsF, QGuiApplication
 
-from atree import ops
+from atree import compress, ops
 from atree.agents import AGENTS, BY_NAME
 from atree.fsutil import atomic_write
 from atree.qt import layout as L
@@ -74,6 +74,7 @@ class Backend(QObject):
     detailsChanged = Signal()
     tasksChanged = Signal()
     aiChanged = Signal()
+    compressChanged = Signal()
     toast = Signal(str, bool)
     undoable = Signal(str, "QVariantList", bool)
     _deliver = Signal(object)
@@ -94,6 +95,19 @@ class Backend(QObject):
                     self._askable.add(a.name)
             except Exception:
                 pass
+        self._mergers = set()
+        for a in AGENTS:
+            try:
+                if compress.can_compress(a):
+                    self._mergers.add(a.name)
+            except Exception:
+                pass
+        self.compressor = compress.compress
+        self.uncompressor = compress.undo
+        self._compress_busy = ""
+        self._compress_state = {}
+        self._compress_report = {}
+        self._report_at = None  # the saved report this window last looked at
         self._metrics = {}
         self._alive = True
 
@@ -253,6 +267,7 @@ class Backend(QObject):
             self.ranks.update(self.talks, self.mono())
             if not same or self.ranks.as_dict() != before:
                 self._rebuild(passive=not self._after_op)
+            self._update_compress()
         if self._scan_queued:
             self._scan_queued = False
             self.refresh()
@@ -322,7 +337,8 @@ class Backend(QObject):
         state = (self._stats, self.shown.width, self.shown.height,
                  json.dumps(self._filters, sort_keys=True), len(self.selection),
                  json.dumps(self._activity, sort_keys=True), json.dumps(self._agents),
-                 json.dumps(self._search_agent()), json.dumps(self._talk_agent()), self.layout_pending)
+                 json.dumps(self._search_agent()), json.dumps(self._talk_agent()),
+                 json.dumps(self._compress_agent()), self.layout_pending)
         if state != self._announced:
             self._announced = state
             self.changed.emit()
@@ -342,6 +358,10 @@ class Backend(QObject):
         """Who a folder's play button starts: the leftmost agent with a new-talk command."""
         return self._leftmost(lambda n: bool(BY_NAME[n].new_command))
 
+    def _compress_agent(self):
+        """Who a folder's Compress button asks: the leftmost shown agent that can merge talks."""
+        return self._leftmost(lambda n: self._enabled(n) and n in self._mergers)
+
     # ------------------------------------------------------------ properties
 
     def _get_nodes(self):
@@ -358,6 +378,12 @@ class Backend(QObject):
     agents = Property("QVariantList", lambda self: self._agents, notify=changed)
     searchAgent = Property("QVariantMap", lambda self: self._search_agent(), notify=changed)
     talkAgent = Property("QVariantMap", lambda self: self._talk_agent(), notify=changed)
+    compressAgent = Property("QVariantMap", lambda self: self._compress_agent(), notify=changed)
+    # folder → "busy" while it is being compressed, "undo" while that can be taken back
+    compressState = Property("QVariantMap", lambda self: dict(self._compress_state), notify=compressChanged)
+    # what the last compression merged: {agent, folder, path, talks, items: [{key, tool, title,
+    # brief, lessons, sources}], errors}, or {} once cleared
+    compressReport = Property("QVariantMap", lambda self: dict(self._compress_report), notify=compressChanged)
     ai = Property("QVariantMap", lambda self: dict(self._ai), notify=aiChanged)
     whoami = Property("QVariantMap", lambda self: self._whoami, constant=True)
     agentInfo = Property("QVariantMap", lambda self: {a.name: {"label": a.label, "color": a.color}
@@ -776,6 +802,116 @@ class Backend(QObject):
         self.aiChanged.emit()
         if had:
             self._rebuild(reset=True)
+
+    # ------------------------------------------------------------ compress
+
+    def _update_compress(self):
+        state = {p: "undo" for p in compress.undoable(self.talks, self.clock())}
+        if self._compress_busy:
+            state[self._compress_busy] = "busy"
+        if state != self._compress_state:
+            self._compress_state = state
+            self.compressChanged.emit()
+        # a compression run elsewhere (the command line, the assistant) reports here too
+        rep = compress.last_report()
+        at = rep["at"] if rep else None
+        if at != self._report_at:
+            self._report_at = at
+            if rep and 0 <= self.clock() - at < compress.UNDO_WINDOW:
+                self._compress_report = dict(rep, folder=self.tildify(rep["path"]))
+                self.compressChanged.emit()
+            elif rep is None and self._compress_report:
+                self._compress_report = {}  # undone there
+                self.compressChanged.emit()
+
+    def _compress_start(self, path):
+        if self._compress_busy:
+            self.toast.emit("still working on %s" % self.tildify(self._compress_busy), True)
+            return False
+        self._compress_busy = path
+        self._update_compress()
+        return True
+
+    def _mergeable(self, path):
+        return compress.candidates([t for t in self.talks if self._enabled(t.get("tool"))], path)
+
+    @Slot(str, result=int)
+    def compressible(self, path):
+        """How many talks kept in ``path`` itself could be merged."""
+        return len(self._mergeable(path))
+
+    @Slot(str)
+    def compressFolder(self, path):
+        """Let the compress agent merge the related talks kept in ``path`` itself."""
+        a = BY_NAME.get(self._compress_agent().get("name"))
+        if a is None:
+            self.toast.emit("no agent here can compress talks", True)
+            return
+        sessions = self._mergeable(path)
+        if len(sessions) < 2:
+            self.toast.emit("fewer than two talks to compress in %s" % self.tildify(path), True)
+            return
+        if not self._compress_start(path):
+            return
+        note = lambda text: self._post(lambda t: self.toast.emit(t, False), text)  # noqa: E731
+        self._spawn(self.compressor, lambda r: self.compress_done(a.label, r, path), a.name, path, sessions, note)
+
+    def compress_done(self, label, result, path=""):
+        if isinstance(result, Exception):
+            self.toast.emit(_message(result), True)
+            return self._compress_end(False)
+        merged, errors = result["merged"], list(result["errors"])
+        talks = sum(len(m["from"]) for m in merged)
+        if merged:
+            self._compress_report = {
+                "agent": label, "folder": self.tildify(path), "path": path, "talks": talks,
+                "errors": errors, "items": [
+                    {"key": m["key"], "tool": m["key"].split(":", 1)[0], "title": m["title"],
+                     "brief": m.get("brief") or "", "lessons": list(m.get("lessons") or []),
+                     "sources": list(m.get("sources") or [])} for m in merged]}
+            self._report_at = (compress.last_report() or {}).get("at")
+            self.compressChanged.emit()
+            head = "merged %d talks into %d · the folder's Undo takes it back for %d min" % (
+                talks, len(merged), compress.UNDO_WINDOW // 60)
+        elif not errors:
+            head = "%s found no talks that belong together" % label
+        else:
+            head = "nothing was merged"
+        self.toast.emit("\n".join([head] + errors), bool(errors))
+        self._compress_end(bool(merged))
+
+    @Slot(str)
+    def undoCompress(self, path):
+        if self._compress_state.get(path) != "undo" or not self._compress_start(path):
+            return
+        self._spawn(self.uncompressor, lambda r: self.undo_done(r, path), path)
+
+    def undo_done(self, result, path=""):
+        if isinstance(result, Exception):
+            self.toast.emit(_message(result), True)
+            return self._compress_end(False)
+        errors = list(result["errors"])
+        if self._compress_report.get("path") == path:
+            self._compress_report = {}  # its merged talks are gone again
+            self._report_at = (compress.last_report() or {}).get("at")
+            self.compressChanged.emit()
+        self.toast.emit("\n".join(["restored %d talk(s)" % len(result["restored"])] + errors), bool(errors))
+        self._compress_end(True)
+
+    @Slot()
+    def clearCompressReport(self):
+        if self._compress_report:
+            compress.forget_report()
+            self._compress_report = {}
+            self._report_at = None
+            self.compressChanged.emit()
+
+    def _compress_end(self, changed):
+        self._compress_busy = ""
+        self._update_compress()
+        if changed:
+            self._after_op = True
+        self.refresh()
 
     # ------------------------------------------------------------ usage
 

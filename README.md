@@ -26,6 +26,15 @@ Desktop Icons NG (the widget leaves its icons clickable). The widget needs GNOME
   instead (needs the GNOME extension on Wayland) or attached from tmux or screen, **move** Claude and Codex talks to another
   folder (their transcripts are rewritten, with a backup first), **archive** talks into
   verified `.tar.gz` files (undo for a few seconds; restore or delete later).
+- **Compress** a folder (the card's Compress button, or its menu): the leftmost agent that can
+  (Claude or Codex) looks through the Claude and Codex talks kept in that folder itself, not
+  below it, picks the groups that belong together and writes each group one merged talk
+  there, a hand-over written from their transcripts that you resume like any talk, named by
+  the agent after what it read ("Merged 3: …"). The talks that went into it are archived. A
+  side panel then says what changed (each merged talk, the talks it replaces, one sentence)
+  and, while there is room, the lessons and suggestions the agent drew from them. The card's
+  ↶ Undo takes it back for 10 minutes (it restores them and drops the new talk unless you
+  continued it); later, restore them from the archive yourself.
 - **Search** by text as you type; press Enter to let the leftmost agent that can (Claude,
   Codex or Gemini) rank the talks that fit the idea, headless. Drag the agent chips or usage
   blocks sideways to choose who comes first; a folder's ▶ starts a new talk with it.
@@ -58,6 +67,8 @@ and `OPENCODE_DB` are honoured.
     ./atree.py --op archive|restore|delete KEY...
     ./atree.py --op move FOLDER KEY...
     ./atree.py --op task "TEXT"
+    ./atree.py --op compress FOLDER [AGENT]
+    ./atree.py --op uncompress FOLDER
     ./atree.py --op tree
 
 ## Tests

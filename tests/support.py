@@ -33,6 +33,7 @@ def paths_for(home):
         (codex, "CODEX_DIR", os.path.join(home, ".codex")),
         (codex, "CODEX_SESSIONS", os.path.join(home, ".codex", "sessions")),
         (codex, "CODEX_DB", os.path.join(home, ".codex", "state_5.sqlite")),
+        (codex, "CODEX_NAMES", os.path.join(home, ".codex", "session_index.jsonl")),
         (gemini, "GEMINI_DIR", os.path.join(home, ".gemini")),
         (gemini, "GEMINI_TMP", os.path.join(home, ".gemini", "tmp")),
         (opencode, "DATA", os.path.join(home, "data", "opencode")),
