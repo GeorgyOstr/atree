@@ -30,9 +30,11 @@ def collect():
     talks = scan_all(errors)
     for t in talks:
         t["archived"] = False
-    index = ops.archived()
-    if not isinstance(index, dict):
-        raise ValueError("the archive index is not a JSON object")
+    try:
+        index = ops.archived()
+    except ops.OpError as e:  # the live talks still show; the index stays untouched
+        errors.append(str(e))
+        index = {}
     scanned = {t["key"] for t in talks}
     for key, entry in index.items():
         # mid-archive/restore (or after a failed removal) the files are still there: the scan wins
@@ -68,7 +70,7 @@ def _archived_only(keys):
     """The keys in the archive index. Read on the ops thread rather than taken from the last scan:
     Undo restores talks archived a moment ago, and a selection can mix live and archived talks."""
     index = ops.archived()
-    return [k for k in keys if isinstance(index, dict) and k in index]
+    return [k for k in keys if k in index]
 
 
 def _message(e):

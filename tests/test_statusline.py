@@ -218,6 +218,13 @@ class Install(HomeCase):
         self.assertEqual(self.call(statusline.uninstall)[0], 0)
         self.assertEqual(self.settings(), {"statusLine": {"type": "command", "command": "cmd-a"}})
 
+    def test_aliases_of_one_account_share_one_file(self):
+        real = self.path(".claude-acct")
+        os.makedirs(real)
+        alias = self.path(".claude-work")
+        os.symlink(real, alias)
+        self.assertEqual(statusline.next_path(alias), statusline.next_path(real))
+
     def test_R_sl_12_other_kinds(self):
         for original in ({"type": "static", "text": "hi", "padding": 2}, {"command": "untyped"}, "plain string", None):
             self.put_settings({"other": True, "statusLine": original})

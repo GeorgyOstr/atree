@@ -348,8 +348,12 @@ class Agenda(QObject):
         m = _mtime(calendars.LIST)
         if m == self._seen and not force:
             return
+        try:  # an unreadable list keeps the calendars shown; the next reload tries again
+            cals = calendars.load_list(strict=True)
+        except OSError:
+            return
         self._seen = m
-        self._cals = calendars.load_list()
+        self._cals = cals
         ids = {c["id"] for c in self._cals}
         for d in (self._deadline, self._fails):
             for cid in [k for k in d if k not in ids]:
@@ -555,6 +559,7 @@ class Agenda(QObject):
                 calendars.save_list([c for c in calendars.load_list(strict=True) if c["id"] != cal_id])
         except OSError as e:
             self._set(error="can't save calendars: %s" % _describe(e))
+            return
         self.reload(force=True)
         self._cache.pop(cal_id, None)
         self._save_cache()

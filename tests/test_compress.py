@@ -278,6 +278,35 @@ class Run(HomeCase):
         self.assertEqual(ops.archived(), {})
         self.assertIsNone(compress.last_report())
 
+    def test_a_merged_talk_continued_meanwhile_is_kept_even_if_nothing_went_in(self):
+        real = ops.archive
+
+        def archive(key, **kw):  # every source fails; the merged talk itself could go
+            if key in self.paths:
+                raise OpError("busy")
+            return real(key, **kw)
+
+        with mock.patch.object(ops, "archive", side_effect=archive), \
+                mock.patch.object(BY_NAME["claude"], "live_pid", return_value=4242):
+            r = compress.compress("claude", self.project)
+        self.assertEqual(r["merged"], [])
+        self.assertIn("it has been continued", r["errors"][0])
+        self.assertEqual(len(self.keys()), len(self.paths) + 1)
+
+    def test_a_source_archived_but_not_fully_removed_still_counts(self):
+        real = ops.archive
+
+        def archive(key, **kw):
+            real(key, **kw)
+            raise OpError("archived %s, but removing the originals failed: denied" % key)
+
+        with mock.patch.object(ops, "archive", side_effect=archive):
+            r = compress.compress("claude", self.project)
+        [m] = r["merged"]
+        self.assertEqual(len(m["from"]), 3)
+        self.assertIn(m["key"], self.keys())
+        self.assertTrue(all(e["merged_into"] == m["key"] for e in ops.archived().values()))
+
     def test_undo_keeps_a_merged_talk_an_idle_terminal_has(self):
         r = compress.compress("claude", self.project)
         key = r["merged"][0]["key"]

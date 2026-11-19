@@ -126,6 +126,21 @@ class CodexReview(HomeCase):
         con.close()
         self.assertEqual(codex._index()[0]["known"]["title"], "Changed, longer title")
 
+    def test_failed_index_read_is_not_cached(self):
+        self.db()
+        good = codex._index()
+        codex._index_cache.update(key=None)  # force a re-read
+        real = sqlite3.connect
+        with mock.patch.object(codex.sqlite3, "connect", side_effect=sqlite3.OperationalError("locked")):
+            self.assertIs(codex._index(), good)  # the last good read, not an empty one
+        codex._index_cache.update(key=None, value=None)
+        with mock.patch.object(codex.sqlite3, "connect", side_effect=sqlite3.OperationalError("locked")):
+            self.assertEqual(codex._index(), ({}, {}))
+        self.assertIsNone(codex._index_cache["key"])
+        with mock.patch.object(codex.sqlite3, "connect", side_effect=real) as connect:
+            self.assertIn("known", codex._index()[0])  # retried once the lock clears
+            self.assertEqual(connect.call_count, 1)
+
 
 class GeminiReview(HomeCase):
     @unittest.skipIf(os.geteuid() == 0, "root reads any directory")

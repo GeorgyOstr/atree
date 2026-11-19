@@ -1,4 +1,5 @@
 """The cleanup assistant: a coding agent opened in its own folder with a tree snapshot."""
+import json
 import os
 import shlex
 import sys
@@ -130,7 +131,11 @@ def write_context(sessions=None):
         sessions = scan_all()
         scanned = {s["key"] for s in sessions}
         # mid-archive or restore (or after a failed removal) the files are still there: the scan wins
-        sessions += [dict(e, key=k, archived=True, live=False) for k, e in ops.archived().items()
+        try:
+            index = ops.archived()
+        except OpError:  # the live talks are still worth listing
+            index = {}
+        sessions += [dict(e, key=k, archived=True, live=False) for k, e in index.items()
                      if isinstance(e, dict) and k not in scanned]
     own = [s for s in sessions if not is_own(s)]
     talks = [_row(s) for s in sorted(own, key=lambda s: (s["cwd"], -(s.get("updated") or 0)))]
@@ -203,9 +208,17 @@ def cli(args):
             print("usage: --op task TEXT")
             return 2
         with ops.tasks_lock():
-            tasks = ops._load(ops.TASKS_FILE, [])
-            if not isinstance(tasks, list):
+            try:
+                with open(ops.TASKS_FILE, "rb") as f:
+                    tasks = json.load(f)
+            except FileNotFoundError:
                 tasks = []
+            except (OSError, ValueError) as e:
+                tasks = e
+            if not isinstance(tasks, list):  # saving over it would lose every task it holds
+                print("can't read %s, not saving: %s" % (ops.TASKS_FILE, tasks if isinstance(tasks, Exception)
+                                                         else "it does not hold a list"))
+                return 1
             tasks.append({"id": "%x" % time.time_ns(), "text": " ".join(text.split()), "done": False})
             ops._save(ops.TASKS_FILE, tasks)
         print("task added")

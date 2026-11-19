@@ -1056,15 +1056,21 @@ class AgendaReviewFixes(AgendaCase):
 
     def test_unreadable_list_is_not_overwritten(self):
         self.calendars_file("c1", "c2")
+        self.cache_file({c: {"at": 1000, "events": []} for c in ("c1", "c2")})
         a = self.make()
-        before = read(calendars.LIST)
+        before, cache_before = read(calendars.LIST), read(calendars.CACHE)
+        shown = list(a._cals)
         with mock.patch.object(calendars, "open", side_effect=PermissionError(13, "Permission denied"), create=True):
+            a.reload(force=True)
+            self.assertEqual(a._cals, shown)  # a failed read keeps the calendars
             a.removeCalendar("c1")
+            self.assertEqual(a._cals, shown)
             self.assertEqual(a.error, "can't save calendars: Permission denied")
             a._state["error"] = ""
             a._on_added(("New", "https://x/new", {"at": 1000, "events": []}))
             self.assertEqual(a.error, "can't save calendars: Permission denied")
         self.assertEqual(read(calendars.LIST), before)
+        self.assertEqual(read(calendars.CACHE), cache_before)  # the cache is not emptied either
 
     def test_cache_error_clears_after_a_good_save(self):
         self.calendars_file("c1")

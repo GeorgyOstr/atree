@@ -141,6 +141,15 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(sorted((x["key"], x["archived"]) for x in talks),
                          [("claude:a", False), ("claude:b", True)])
 
+    def test_collect_keeps_live_talks_when_the_archive_index_is_unreadable(self):
+        from atree.qt import backend as backend_mod
+        t = S.talk("a", "/p", NOW)
+        with mock.patch("atree.scan.scan_all", return_value=[dict(t)]), \
+                mock.patch.object(ops, "archived", side_effect=ops.OpError("the archive index can't be read")):
+            talks, errors = backend_mod.collect()
+        self.assertEqual([x["key"] for x in talks], ["claude:a"])
+        self.assertEqual(errors, ["the archive index can't be read"])
+
     def test_stats(self):
         b = backend()
         b.apply_scan([S.talk("a", "/p", NOW, live=True), S.talk("b", "/p", NOW),

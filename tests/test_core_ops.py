@@ -243,6 +243,24 @@ class Guards(StubCase):
             self.assertEqual(ops.restore("stub:s1"), self.transcript)
         self.assertTrue(os.path.exists(self.transcript))
 
+    def test_failed_index_write_on_restore_undoes_the_agent_hook(self):
+        ops.archive("stub:s1")
+        self.agent.after_archive.reset_mock()
+        with mock.patch.object(ops, "_save", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OpError, "disk full"):
+                ops.restore("stub:s1")
+        self.agent.after_restore.assert_called_once()
+        self.agent.after_archive.assert_called_once()
+        self.assertFalse(os.path.exists(self.session))
+
+    def test_restore_keeps_files_when_the_hook_cannot_be_undone(self):
+        ops.archive("stub:s1")
+        self.agent.after_archive.side_effect = RuntimeError("db locked")
+        with mock.patch.object(ops, "_save", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OpError, "disk full"):
+                ops.restore("stub:s1")
+        self.assertTrue(os.path.exists(self.transcript))
+
     def test_annotate_all_writes_once(self):
         ops.archive("stub:s1")
         with mock.patch.object(ops, "_save", wraps=ops._save) as save:

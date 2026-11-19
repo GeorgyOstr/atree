@@ -275,10 +275,6 @@ class DragTest(Base):
         self.assertNotEqual(expected, "/w/c03")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RestoreViewTest(unittest.TestCase):
     def test_saved_pan_survives_the_empty_start(self):
         # the window opens before the first scan: bounds are collapsed until content arrives
@@ -309,3 +305,7 @@ class ChipStabilityTest(unittest.TestCase):
         self.assertTrue(all(a is c for a, c in zip(chips, v.find_all("agentChip"))))
         b.setFilter("live", False)           # filters are saved: leave none for later tests
         v.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

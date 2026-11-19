@@ -40,6 +40,8 @@ export default class AtreeDesktop extends Extension {
         this._tries = 0;
         this._gaveUp = false;
         this._pinnedAt = 0;
+        this._quickExits = 0;
+        this._spawnedAt = 0;
 
         this._connect(global.window_manager, 'map', (_wm, actor) => this._onMap(actor), true);
         this._connect(global.display, 'workareas-changed', () => this._check(true));

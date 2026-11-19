@@ -129,6 +129,23 @@ class Cli(HomeCase):
         [t] = json.loads(read(ops.TASKS_FILE))
         self.assertEqual((t["text"], t["done"]), ("fix the thing", False))
 
+    def test_task_keeps_a_task_file_it_cannot_read(self):
+        os.makedirs(os.path.dirname(ops.TASKS_FILE), exist_ok=True)
+        for bad in ('[{"id": "1", "text": "kept"', '{"id": "1"}'):
+            with open(ops.TASKS_FILE, "w") as f:
+                f.write(bad)
+            code, out = run_cli(["task", "new"])
+            self.assertEqual(code, 1)
+            self.assertIn("not saving", out)
+            with open(ops.TASKS_FILE) as f:
+                self.assertEqual(f.read(), bad)
+
+    def test_tree_lists_live_talks_when_the_archive_index_is_unreadable(self):
+        os.makedirs(os.path.dirname(ops.ARCHIVE_INDEX), exist_ok=True)
+        with open(ops.ARCHIVE_INDEX, "w") as f:
+            f.write("{")
+        self.assertEqual(run_cli(["tree"])[0], 0)
+
     def test_ops(self):
         make_all(self.home, self.project)
         code, out = run_cli(["archive", "claude:claude-fixture", "claude:missing"])

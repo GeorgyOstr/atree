@@ -116,6 +116,26 @@ test('a widget that keeps dying at start is respawned less and less often', () =
     ext.disable();
 });
 
+test('re-enabling starts the respawn back-off over', () => {
+    const w = withConfig(GOOD);
+    const ext = w.make();
+    ext.enable();
+    for (let i = 0; i < 7; i++) {
+        const n = w.launches.length;
+        w.procs[n - 1].exit();
+        while (w.launches.length === n)
+            w.advance(1000);
+    }
+    ext.disable();
+    w.advance(3600000);
+    ext.enable();
+    const n = w.launches.length;
+    w.procs[n - 1].exit();
+    w.advance(5000);
+    assert.equal(w.launches.length, n + 1);
+    ext.disable();
+});
+
 test('R-ext-9: foreign, transient and non-normal windows are ignored', () => {
     const w = withConfig(GOOD);
     const ext = w.make();

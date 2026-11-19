@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sqlite3
+import threading
 import time
 import urllib.parse
 
@@ -77,6 +78,7 @@ def rollouts():
 
 
 _index_cache = {"key": None, "value": None}
+_index_lock = threading.Lock()  # scans run on several threads; key and value change together
 
 
 def _file_key(path):
@@ -88,22 +90,26 @@ def _file_key(path):
 
 def _index():
     """(rows by id, spawn parent by child id), re-read only when the database or its WAL changed."""
-    key = (CODEX_DB, _file_key(CODEX_DB), _file_key(CODEX_DB + "-wal"))
-    if key[1] is not None and key == _index_cache["key"]:
+    with _index_lock:
+        key = (CODEX_DB, _file_key(CODEX_DB), _file_key(CODEX_DB + "-wal"))
+        if key[1] is not None and key == _index_cache["key"]:
+            return _index_cache["value"]
+        rows, edges, ok = _read_index()
+        if not ok:  # e.g. locked: keep the last good read and retry on the next scan
+            return _index_cache["value"] or (rows, edges)
+        _index_cache["key"], _index_cache["value"] = key, (rows, edges)
         return _index_cache["value"]
-    value = _read_index()
-    _index_cache["key"], _index_cache["value"] = key, value
-    return value
 
 
 def _read_index():
+    """(rows, edges, ok); ok is False when a database error cut the read short."""
     rows, edges = {}, {}
     if not os.path.exists(CODEX_DB):
-        return rows, edges
+        return rows, edges, True
     try:
         con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(CODEX_DB), uri=True, timeout=2)
     except sqlite3.Error:
-        return rows, edges
+        return rows, edges, False
     try:
         con.row_factory = sqlite3.Row
         cols = {r[1] for r in con.execute("PRAGMA table_info(threads)")}
@@ -117,10 +123,10 @@ def _read_index():
             for parent, child in con.execute("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges"):
                 edges[child] = parent
     except sqlite3.Error:
-        pass
+        return rows, edges, False
     finally:
         con.close()
-    return rows, edges
+    return rows, edges, True
 
 
 def _update_index(sql, args):

@@ -282,9 +282,14 @@ _stamp = ops.stamp
 
 
 def _drop(key):
-    """Take back a merged talk that nothing went into."""
+    """Take back a merged talk that nothing went into, unless it has been continued meanwhile."""
     try:
-        ops.archive(key, idle=True)
+        s = {t["key"]: t for t in scan_all()}.get(key)
+        if s is None:
+            return []
+        if (s.get("prompts") or 0) > 1 or BY_NAME[s["tool"]].live_pid(s):
+            return ["kept the merged talk '%s': it has been continued" % _name(s)]
+        ops.archive(key, idle=True, expect=_stamp(s))  # a prompt typed since keeps it too
         ops.delete_archived(key)
     except Exception as e:
         return ["the merged talk %s stays: %s" % (key, str(e) or type(e).__name__)]
@@ -329,6 +334,12 @@ def merge(a, folder, group):
                 sources.append(_name(s))
             except Exception as e:
                 errors.append(str(e) or type(e).__name__)
+                try:  # indexed, but removing the original failed: it went in, and Undo must see it
+                    if s["key"] in ops.archived():
+                        done.append(s["key"])
+                        sources.append(_name(s))
+                except OpError:
+                    pass
     finally:
         if not done:  # nothing went in, so no Undo would find this talk: take it back
             errors += _drop(key)

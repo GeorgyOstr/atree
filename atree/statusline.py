@@ -109,8 +109,9 @@ def next_path(config_dir):
     so installing for one account doesn't overwrite another's; ~/.claude keeps the original name."""
     if _is_default(config_dir):
         return NEXT
-    name = os.path.basename(os.path.normpath(config_dir)).lstrip(".") or "account"
-    tag = hashlib.sha256(os.path.realpath(config_dir).encode()).hexdigest()[:8]
+    real = os.path.realpath(config_dir)  # aliases of one dir share one file
+    name = os.path.basename(real).lstrip(".") or "account"
+    tag = hashlib.sha256(real.encode()).hexdigest()[:8]
     return os.path.join(DATA, "statusline-next-%s-%s.json" % (name, tag))
 
 

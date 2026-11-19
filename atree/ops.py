@@ -300,7 +300,7 @@ def restore(key):
         try:
             members = _verify(entry["archive"])
             dests = [_check_member(m, base_dir) for m in members]
-            created = []
+            created, hooked = [], False
             try:
                 os.makedirs(base_dir, exist_ok=True)
                 with tarfile.open(entry["archive"], "r:gz") as tar:
@@ -308,9 +308,15 @@ def restore(key):
                         created.append(dest)
                         tar.extract(m, base_dir, filter="data")
                 agent.after_restore(entry)
+                hooked = True
                 index.pop(key, None)
                 _save(ARCHIVE_INDEX, index)  # failing, the extracted files go: a retry can work
             except BaseException:
+                if hooked:
+                    try:
+                        agent.after_archive(entry)
+                    except Exception:  # the agent's records say restored: its files must stay
+                        created = []
                 for dest in reversed(created):
                     try:
                         if os.path.isdir(dest) and not os.path.islink(dest):
