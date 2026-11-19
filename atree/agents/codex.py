@@ -22,7 +22,7 @@ _TOTAL = re.compile(rb'"total_token_usage":\{[^{}]*?"total_tokens":(\d+)')
 
 
 def _init():
-    return {"meta": None, "bad": False, "prompts": 0, "days": {}, "context": 0, "tokens": 0}
+    return {"meta": None, "bad": False, "prompts": 0, "days": {}, "context": 0, "tokens": 0, "tdays": {}}
 
 
 def _step(st, line):
@@ -50,14 +50,19 @@ def _step(st, line):
             st["context"] = int(m.group(1))
         m = _TOTAL.search(line)
         if m:
-            st["tokens"] = int(m.group(1))
+            total = int(m.group(1))
+            if total > st["tokens"]:  # the running total: its growth is this line's spend
+                ts = _TS.search(line)
+                base.add_day(st["tdays"], json.loads(b'"' + ts.group(1) + b'"') if ts else None,
+                             total - st["tokens"])
+            st["tokens"] = total
 
 
 def _finish(st):
     if st["bad"] or st["meta"] is None:
         return None
     return {"meta": st["meta"], "prompts": st["prompts"], "days": dict(st["days"]),
-            "context": st["context"], "tokens": st["tokens"]}
+            "context": st["context"], "tokens": st["tokens"], "tdays": dict(st["tdays"])}
 
 
 def rollouts():
@@ -179,7 +184,7 @@ class Codex(Agent):
                 size=st.st_size, path=path, related=related,
                 parent="codex:%s" % parent if parent else None,
                 live=live, live_status="active" if live else None,
-                context=info["context"], tokens=info["tokens"]))
+                context=info["context"], tokens=info["tokens"], tdays=info["tdays"]))
         return talks
 
     def move(self, s, target):

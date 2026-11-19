@@ -128,6 +128,14 @@ def count_day(days, iso_ts):
         days[day] = days.get(day, 0) + 1
 
 
+def add_day(days, iso_ts, n):
+    """Add ``n`` (tokens) to the local day of ``iso_ts``."""
+    t = iso_to_epoch(iso_ts) if n else None
+    if t:
+        day = local_day(t)
+        days[day] = days.get(day, 0) + n
+
+
 def pid_alive(pid):
     try:
         os.kill(pid, 0)

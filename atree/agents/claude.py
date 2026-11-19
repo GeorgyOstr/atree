@@ -47,7 +47,7 @@ def _init():
     return {"cwd": None, "first": None, "last": None, "branch": None, "ai": None,
             "custom": None, "first_msg": None, "prompts": 0, "uuids": set(),
             "ext_parent": None, "days": {}, "context": 0, "total": 0,
-            "msg": None, "msg_tokens": 0}
+            "msg": None, "msg_tokens": 0, "msg_day": None, "tdays": {}}
 
 
 def _step(st, line):
@@ -84,7 +84,9 @@ def _step(st, line):
         mid = m.group(1).decode() if m else None
         if mid != st["msg"]:
             st["total"] += st["msg_tokens"]
+            base.add_day(st["tdays"], st["msg_day"], st["msg_tokens"])
             st["msg"] = mid
+            st["msg_day"] = st["last"]
         st["msg_tokens"] = ctx
         st["context"] = ctx
         return
@@ -115,6 +117,8 @@ def _finish(st):
     out["days"] = dict(st["days"])
     out["uuids"] = frozenset(st["uuids"])
     out["tokens"] = st["total"] + st["msg_tokens"]
+    out["tdays"] = dict(st["tdays"])  # tokens per local day (the open message included)
+    base.add_day(out["tdays"], st["msg_day"], st["msg_tokens"])
     return out
 
 
@@ -229,7 +233,7 @@ class Claude(Agent):
                 prompts=info["prompts"], days=info["days"], branch=info["branch"] or None,
                 size=st.st_size, agents=agents, path=path, related=related,
                 live=lv is not None, live_status=lv["status"] if lv else None,
-                context=info["context"], tokens=info["tokens"]))
+                context=info["context"], tokens=info["tokens"], tdays=info["tdays"]))
         return talks
 
     def move(self, s, target):
@@ -288,28 +292,15 @@ class Claude(Agent):
         return CLAUDE_PROJECTS, members
 
     def usage(self):
-        from .. import statusline
-        saved = statusline.limits()
-        if not saved:
+        """The first account's bars, plus every account (~/.claude, ~/.claude1, ...) with credits."""
+        from .. import claude_usage
+        accounts = claude_usage.all_accounts(CLAUDE_DIR)
+        if not accounts:
             if statusline_installed():
                 return {"error": "waiting for Claude Code's status line"}
             return {"error": "run atree.py --install-statusline"}
-        bars = []
-        now = time.time()
-        limits = saved.get("rate_limits") or {}
-        for key, label, window in (("five_hour", "session (5h)", 18000), ("seven_day", "week", 604800)):
-            b = limits.get(key) if isinstance(limits, dict) else None
-            if not isinstance(b, dict):
-                continue
-            used = b.get("used_percentage")
-            if type(used) not in (int, float):
-                continue
-            resets = b.get("resets_at")
-            if isinstance(resets, str):
-                resets = base.iso_to_epoch(resets)
-            elif type(resets) not in (int, float):
-                resets = None
-            stale = bool(resets) and resets <= now
-            bars.append({"label": label, "used": 0.0 if stale else float(used),
-                         "window": window, "resets_at": resets, "stale": stale})
-        return {"bars": bars, "observed_at": saved.get("at")}
+        seen = [a["observed_at"] for a in accounts if type(a.get("observed_at")) in (int, float)]
+        out = {"bars": accounts[0]["bars"], "observed_at": min(seen) if seen else None}
+        if len(accounts) > 1 or any(a.get("credits") for a in accounts):
+            out["accounts"] = accounts
+        return out

@@ -39,6 +39,13 @@ QtObject {
         return agentColors[name] !== undefined ? agentColors[name] : muted
     }
 
+    // accounts of one agent (~/.claude, ~/.claude1, ...) overlap in one usage bar
+    readonly property var accountColors: ["#3ddc84", "#5aa9ff", "#c78bff", "#f2b84b"]
+
+    function accountColor(slot) {
+        return accountColors[(slot || 0) % accountColors.length]
+    }
+
     function usageColor(left) {
         return left > 50 ? live : (left > 20 ? warn : bad)
     }

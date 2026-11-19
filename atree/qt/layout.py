@@ -85,7 +85,7 @@ def age_text(seconds):
 
 def default_filters(agent_names):
     f = {name: True for name in agent_names}
-    f.update(live=False, archived=False, age=30, sort="recent", reverse=False, q="")
+    f.update(live=False, archived=False, age=30, sort="recent", reverse=False, q="", activity="prompts")
     return f
 
 
@@ -410,6 +410,10 @@ def _build(d, label, is_root, kids, ctx):
             run.append(c)
             continue
         if len(run) > 1:
+            # the parent's link ends at a grid's first card, so running cards go first:
+            # otherwise the green line lands on a card that isn't live (Reverse keeps its mirror)
+            if not ctx.reverse:
+                run.sort(key=lambda c: not any(t.get("live") for t, _ in c.items))
             packed.append(_Node("grid", run[0].path, "", children=run,
                                 items=[it for r in run for it in r.items]))
         else:
@@ -640,8 +644,13 @@ def under(path, base):
 
 # ------------------------------------------------------------------ activity
 
-def activity_grid(talks, agents, today):
-    """``agents``: [(name, label)] in the user's order; ``today``: a date."""
+ACTIVITY_METRICS = ("prompts", "tokens")
+
+
+def activity_grid(talks, agents, today, metric="prompts"):
+    """``agents``: [(name, label)] in the user's order; ``today``: a date;
+    ``metric``: count prompts or tokens spent per day."""
+    field = "tdays" if metric == "tokens" else "days"
     first_this = today.replace(day=1)
     first_last = (first_this - _dt.timedelta(days=1)).replace(day=1)
     nxt = (first_this + _dt.timedelta(days=32)).replace(day=1)
@@ -656,7 +665,7 @@ def activity_grid(talks, agents, today):
         tool = t.get("tool")
         if tool not in per:
             continue
-        for iso, n in (t.get("days") or {}).items():
+        for iso, n in (t.get(field) or {}).items():
             if isinstance(n, (int, float)) and not isinstance(n, bool):
                 per[tool][iso] = per[tool].get(iso, 0) + int(n)
     weeks, peak = [], {n: 1 for n in names}
@@ -676,9 +685,11 @@ def activity_grid(talks, agents, today):
                          "inside": inside, "future": d > today, "today": d == today, "n": counts})
             d += _dt.timedelta(days=1)
         weeks.append(week)
-    months = [{"name": MONTHS[m.month - 1], "week": (m - start).days // 7, "totals": totals[m.month]}
+    show = short_number if metric == "tokens" else (lambda n: "{:,}".format(n))
+    months = [{"name": MONTHS[m.month - 1], "week": (m - start).days // 7, "totals": totals[m.month],
+               "text": {n: show(c) for n, c in totals[m.month].items()}}
               for m in (first_last, first_this)]
-    return {"weeks": weeks, "months": months, "peak": peak, "tools": tools}
+    return {"weeks": weeks, "months": months, "peak": peak, "tools": tools, "metric": metric}
 
 
 # ------------------------------------------------------------------ usage
@@ -728,18 +739,95 @@ def usage_bar(b, now):
             "left": _round(left), "pace": pace, "resets": text}
 
 
-def usage_groups(data, agents, now):
-    """``agents``: [(name, label)] in display order → groups present in ``data``."""
+def short_number(n):
+    """100, 120K, 32M, 2.5B, 2.5T: three significant characters at most."""
+    n = max(0, int(n or 0))
+    for size, unit in ((10 ** 12, "T"), (10 ** 9, "B"), (10 ** 6, "M"), (10 ** 3, "K")):
+        if n >= size:
+            x = n / size
+            return ("%.1f" % x).rstrip("0").rstrip(".") + unit if x < 10 else "%d%s" % (x, unit)
+    return str(n)
+
+
+def week_tokens(talks, today):
+    """Tokens each agent spent over the last 7 days (today included), from the talks' per-day counts."""
+    days = {(today - _dt.timedelta(days=i)).isoformat() for i in range(7)}
+    out = {}
+    for t in talks:
+        for iso, n in (t.get("tdays") or {}).items():
+            if iso in days and isinstance(n, (int, float)) and not isinstance(n, bool):
+                out[t.get("tool")] = out.get(t.get("tool"), 0) + int(n)
+    return out
+
+
+def usage_groups(data, agents, now, tokens=None):
+    """``agents``: [(name, label)] in display order → groups present in ``data``;
+    ``tokens``: {agent: tokens this week}."""
+    tokens = tokens or {}
     out = []
     for name, label in agents:
         u = data.get(name) if isinstance(data, dict) else None
         if not isinstance(u, dict):
             continue
+        accounts = [a for a in u.get("accounts") or [] if isinstance(a, dict)]
+        if accounts:
+            bars, legend, credit = account_bars(accounts, now)
+        else:
+            bars = [usage_bar(b, now) for b in u.get("bars") or [] if isinstance(b, dict)]
+            legend, credit = [], None
         out.append({"name": label, "key": name,
                     "plan": str(u.get("plan") or "").replace("_", " "),
-                    "error": usage_note(u, now),
-                    "bars": [usage_bar(b, now) for b in u.get("bars") or [] if isinstance(b, dict)]})
+                    # errors get a line; "as of HH:MM" only the bar tooltips
+                    "error": str(u["error"]) if u.get("error") else "",
+                    "asof": "" if u.get("error") else usage_note(u, now), "bars": bars, "accounts": legend, "credit": credit,
+                    "tokens": short_number(tokens[name]) if tokens.get(name) else ""})
     return out
+
+
+def money(x, currency):
+    sign = "$" if currency == "USD" else ""
+    text = ("%.0f" % x) if x == int(x) else ("%.2f" % x)
+    return sign + text + ("" if sign else " " + currency)
+
+
+def account_bars(accounts, now):
+    """Several accounts of one agent → one row per window with a series per account
+    (``slot`` picks its colour), and the accounts' extra-usage credits."""
+    labels = []
+    for a in accounts:
+        for b in a.get("bars") or []:
+            if isinstance(b, dict) and b.get("label") not in labels:
+                labels.append(b.get("label"))
+    rows = []
+    for label in labels:
+        series = []
+        for slot, a in enumerate(accounts):
+            b = next((b for b in a.get("bars") or [] if isinstance(b, dict) and b.get("label") == label), None)
+            if b is not None:
+                series.append(dict(usage_bar(b, now), account=str(a.get("name") or ""), slot=slot))
+        left = _round(sum(x["left"] for x in series) / len(series))  # accounts weigh the same
+        rows.append(dict(series[0], label=str(label or ""), series=series, left=left, used=100 - left))
+    legend = [{"account": str(a.get("name") or ""), "slot": slot} for slot, a in enumerate(accounts)]
+    # extra-usage credits: one graph, a series per account that has them; totals in the text
+    series, tips, used_sum, limit_sum, cur = [], [], 0.0, 0.0, "USD"
+    for slot, a in enumerate(accounts):
+        c = a.get("credits")
+        acct = str(a.get("name") or "")
+        if not isinstance(c, dict):
+            continue
+        if "off" in c:
+            tips.append("%s: off (%s)" % (acct, c["off"]))
+            continue
+        used, limit, cur = float(c.get("used") or 0), float(c.get("limit") or 0), c.get("currency") or "USD"
+        series.append({"slot": slot, "frac": min(1.0, used / limit) if limit > 0 else 0.0})
+        tips.append("%s: %s of %s" % (acct, money(used, cur), money(limit, cur)))
+        used_sum, limit_sum = used_sum + used, limit_sum + limit
+    credit = None
+    if series:
+        credit = {"series": series, "full": used_sum >= limit_sum,
+                  "text": "%s/%s" % (money(used_sum, cur), money(limit_sum, cur)),
+                  "tip": "credits this month\n" + "\n".join(tips)}
+    return rows, legend, credit
 
 
 # ------------------------------------------------------------------ settings
@@ -775,6 +863,8 @@ def load_settings(raw, agent_names):
             filters[k] = v
     if filters["sort"] not in SORTS:
         filters["sort"] = "recent"
+    if filters["activity"] not in ACTIVITY_METRICS:
+        filters["activity"] = "prompts"
     if filters["age"] < 0:
         filters["age"] = 30
     d = raw.get("dirs")

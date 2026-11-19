@@ -7,8 +7,25 @@ SidePanel {
     readonly property var weeks: grid.weeks || []
     readonly property var tools: grid.tools || []
 
+    readonly property bool tokens: grid.metric === "tokens"
+
     title: "Activity"
-    note: "prompts per day"
+    note: tokens ? "tokens per day" : "prompts per day"
+    // switch what a cell counts; remembered with the other filters
+    action: tokens ? "prompts" : "tokens"
+    onActionClicked: backend.setFilter("activity", tokens ? "prompts" : "tokens")
+
+    // 100, 120K, 32M, 2.5T (as layout.short_number)
+    function shortNumber(n) {
+        var units = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]]
+        for (var i = 0; i < units.length; i++) {
+            if (n >= units[i][0]) {
+                var x = n / units[i][0]
+                return (x < 10 ? String(Math.floor(x * 10 + 0.5) / 10) : String(Math.floor(x))) + units[i][1]
+            }
+        }
+        return String(Math.floor(n))
+    }
     width: Math.max(320, matrices.implicitWidth + 24)
     bodyHeight: matrices.implicitHeight + 12
     fadeDuration: Theme.quick
@@ -123,8 +140,9 @@ SidePanel {
                                                 var n = cell.modelData.n[matrix.tool] || 0
                                                 Ui.showTip(cell, cell.modelData.label + (cell.modelData.today ? " (today)" : "")
                                                            + "\n" + matrix.modelData.label + ": "
-                                                           + Number(n).toLocaleString(Qt.locale(), "f", 0)
-                                                           + (n === 1 ? " prompt" : " prompts"), 0)
+                                                           + (panel.tokens ? panel.shortNumber(n) + " tokens"
+                                                              : Number(n).toLocaleString(Qt.locale(), "f", 0)
+                                                                + (n === 1 ? " prompt" : " prompts")), 0)
                                             } else {
                                                 Ui.hideTip(cell)
                                             }
@@ -144,7 +162,7 @@ SidePanel {
                         model: panel.grid.months || []
                         Text {
                             required property var modelData
-                            text: modelData.name + " " + Number(modelData.totals[matrix.tool] || 0).toLocaleString(Qt.locale(), "f", 0)
+                            text: modelData.name + " " + ((modelData.text || {})[matrix.tool] || "0")
                             font.pixelSize: 10
                             color: Theme.muted
                         }

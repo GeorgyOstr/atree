@@ -249,6 +249,7 @@ class Backend(QObject):
                 self._by_key = {t["key"]: t for t in self.talks}
                 self._agents = self._agents_here()
                 self._activity = self._compute_activity()
+                self._update_usage()  # the week's token totals come from the talks
             self.ranks.update(self.talks, self.mono())
             if not same or self.ranks.as_dict() != before:
                 self._rebuild(passive=not self._after_op)
@@ -279,7 +280,8 @@ class Backend(QObject):
 
     def _compute_activity(self):
         talks = [t for t in self.talks if self._enabled(t.get("tool"))]
-        return L.activity_grid(talks, [(a.name, a.label) for a in self._ordered()], self._today())
+        return L.activity_grid(talks, [(a.name, a.label) for a in self._ordered()], self._today(),
+                               self._filters.get("activity", "prompts"))
 
     # ------------------------------------------------------------ layout
 
@@ -390,6 +392,8 @@ class Backend(QObject):
                 return
         elif name == "sort" and value not in L.SORTS:
             return
+        elif name == "activity" and value not in L.ACTIVITY_METRICS:
+            return
         else:
             value = "" if value is None else str(value)
         if value == cur:
@@ -399,6 +403,10 @@ class Backend(QObject):
             self._agent_toggled(name, value)
         if name != "q":
             self._save_settings()
+        if name == "activity":  # the Activity panel's prompts/tokens switch; the tree doesn't care
+            self._activity = self._compute_activity()
+            self._announce()
+            return
         self._rebuild(reset=True)
 
     def _agent_toggled(self, name, on):
@@ -789,7 +797,7 @@ class Backend(QObject):
 
     def _update_usage(self):
         groups = [g for g in L.usage_groups(self._usage_raw, [(a.name, a.label) for a in self._ordered()],
-                                            self.clock())
+                                            self.clock(), L.week_tokens(self.talks, self._today()))
                   if self._enabled(g["key"])]
         if groups != self._usage:
             self._usage = groups

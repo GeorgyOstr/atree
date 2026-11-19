@@ -16,7 +16,8 @@ CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(_HOME, ".c
 DATA = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(_HOME, ".local", "share"), "atree")
 LIMITS = os.path.join(CACHE, "claude-limits.json")
 NEXT = os.path.join(DATA, "statusline-next.json")
-CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(_HOME, ".claude")
+DEFAULT_DIR = os.path.join(_HOME, ".claude")
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or DEFAULT_DIR
 SETTINGS = os.path.join(CLAUDE_DIR, "settings.json")
 BACKUP = SETTINGS + ".atree-backup"
 
@@ -75,7 +76,7 @@ def run():
     limits = payload.get("rate_limits") if isinstance(payload, dict) else None
     if isinstance(limits, dict) and limits:
         try:
-            atomic_write(LIMITS, _dump({"at": time.time(), "rate_limits": limits}), 0o600)
+            atomic_write(limits_path(CLAUDE_DIR), _dump({"at": time.time(), "rate_limits": limits}), 0o600)
         except OSError:
             pass
     nxt = _load(NEXT)
@@ -86,8 +87,17 @@ def run():
     return subprocess.run(command, shell=True, input=data, env=env).returncode
 
 
-def limits():
-    saved = _load(LIMITS)
+def limits_path(config_dir):
+    """Each account (CLAUDE_CONFIG_DIR) keeps its own file; ~/.claude keeps the original name."""
+    default = os.path.join(os.path.expanduser("~"), ".claude")  # HOME now, not at import
+    if os.path.realpath(config_dir) == os.path.realpath(default):
+        return LIMITS
+    name = os.path.basename(os.path.normpath(config_dir)).lstrip(".") or "account"
+    return os.path.join(CACHE, "claude-limits-%s.json" % name)
+
+
+def limits(path=None):
+    saved = _load(path or LIMITS)
     if isinstance(saved, dict) and isinstance(saved.get("rate_limits"), dict):
         return saved
     return None

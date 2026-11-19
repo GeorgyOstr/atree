@@ -138,7 +138,7 @@ class HeaderTest(unittest.TestCase):
         for g in groups:
             for bar in children(g, "usageBar"):
                 parts = [c for c in bar.childItems() if c.isVisible()]
-                self.assertEqual(len(parts), 4)                    # label, track, % left, reset
+                self.assertEqual(len(parts), 3)                    # label, track, % left (reset: tooltip)
                 self.assertEqual(parts[0].width(), 74)
                 self.assertEqual(parts[1].width(), 110)
         for item in groups + [v.find("headerTools")]:

@@ -18,6 +18,10 @@ Column {
         NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
     }
 
+    // name row: the week's tokens and, with several accounts, a legend (dot + name) and one
+    // 3 px credits graph with a series per account (the row's height doesn't change)
+    Row {
+    spacing: 10
     Text {
         text: String(group.data_.name || "").toUpperCase() + "  ✦"
         textFormat: Text.PlainText
@@ -40,6 +44,77 @@ Column {
         }
     }
     Text {
+        objectName: "usageTokens"
+        visible: text !== ""
+        text: group.data_.tokens || ""
+        textFormat: Text.PlainText
+        font.pixelSize: 11
+        color: Theme.text
+        anchors.verticalCenter: parent.verticalCenter
+        HoverHandler {
+            onHoveredChanged: hovered ? Ui.showTip(parent, "tokens spent over the last 7 days (cache reads included)", 500)
+                                      : Ui.hideTip(parent)
+        }
+    }
+    Repeater {
+        model: group.data_.accounts || []
+        Row {
+            id: acct
+            objectName: "usageAccount"
+            required property var modelData
+            spacing: 4
+            anchors.verticalCenter: parent.verticalCenter
+            Rectangle {
+                width: 6; height: 6; radius: 3
+                color: Theme.accountColor(acct.modelData.slot)
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                text: acct.modelData.account
+                textFormat: Text.PlainText
+                font.pixelSize: 10
+                color: Theme.muted
+                anchors.verticalCenter: parent.verticalCenter
+            }
+        }
+    }
+    Row {
+        id: credit
+        objectName: "creditGraph"
+        readonly property var data_: group.data_.credit || null
+        visible: data_ !== null
+        spacing: 5
+        anchors.verticalCenter: parent.verticalCenter
+        Rectangle {
+            width: 44; height: 3; radius: 1.5
+            color: Theme.bg
+            border.color: Theme.line
+            anchors.verticalCenter: parent.verticalCenter
+            Repeater {
+                model: credit.data_ ? credit.data_.series : []
+                Rectangle {
+                    required property var modelData
+                    width: 44 * modelData.frac
+                    height: 3
+                    radius: 1.5
+                    color: Theme.accountColor(modelData.slot)
+                    opacity: credit.data_.series.length > 1 ? 0.55 : 1
+                }
+            }
+        }
+        Text {
+            text: credit.data_ ? credit.data_.text : ""
+            textFormat: Text.PlainText
+            font.pixelSize: 10
+            color: credit.data_ && credit.data_.full ? Theme.bad : Theme.text
+            anchors.verticalCenter: parent.verticalCenter
+        }
+        HoverHandler {
+            onHoveredChanged: hovered && credit.data_ ? Ui.showTip(credit, credit.data_.tip, 500) : Ui.hideTip(credit)
+        }
+    }
+    }
+    Text {
         visible: text !== ""
         width: 220
         text: group.data_.error || ""
@@ -56,6 +131,22 @@ Column {
             id: bar
             objectName: "usageBar"
             required property var modelData
+            // one series per account; a single account keeps the green/amber/red fill
+            readonly property var series: modelData.series || [modelData]
+            readonly property bool multi: series.length > 1
+            function colorOf(s) { return multi ? Theme.accountColor(s.slot) : Theme.usageColor(s.left) }
+            function tipText() {
+                return (group.data_.asof ? group.data_.asof + "\n" : "") + seriesTip()
+            }
+            function seriesTip() {
+                if (!multi)
+                    return modelData.used + "% used" + (modelData.resets ? " · " + modelData.resets : "")
+                        + "\nwhite tick = even pace for this window"
+                        + (group.data_.plan ? "\nplan: " + group.data_.plan : "")
+                return series.map(s => s.account + ": " + s.used + "% used"
+                                  + (s.resets ? " · " + s.resets : "")).join("\n")
+                    + "\n" + modelData.left + "% left on average · ticks = even pace per account"
+            }
             spacing: 8
             Text {
                 width: 74
@@ -77,29 +168,36 @@ Column {
                     radius: 4
                     color: Theme.bg
                     border.color: Theme.line
-                    Rectangle {
-                        height: parent.height
-                        radius: 4
-                        width: parent.width * bar.modelData.left / 100
-                        color: Theme.usageColor(bar.modelData.left)
-                        Behavior on width { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
+                    // translucent fills overlap: where both accounts still have room the colours mix
+                    Repeater {
+                        model: bar.series
+                        Rectangle {
+                            required property var modelData
+                            height: track.height
+                            radius: 4
+                            width: track.width * modelData.left / 100
+                            color: bar.colorOf(modelData)
+                            opacity: bar.multi ? 0.55 : 1
+                            Behavior on width { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
+                        }
                     }
                 }
-                Rectangle {
-                    visible: bar.modelData.pace >= 0
-                    x: bar.modelData.pace * track.width - 1
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: 2
-                    height: 12
-                    color: Qt.rgba(0.902, 0.914, 0.941, 0.75)
+                Repeater {
+                    model: bar.series
+                    Rectangle {
+                        required property var modelData
+                        visible: modelData.pace >= 0
+                        x: modelData.pace * track.width - 1
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 2
+                        height: 12
+                        color: bar.multi ? Theme.accountColor(modelData.slot) : Qt.rgba(0.902, 0.914, 0.941, 0.75)
+                    }
                 }
                 MouseArea {
                     anchors.fill: parent
                     hoverEnabled: true
-                    onContainsMouseChanged: containsMouse
-                        ? Ui.showTip(parent, bar.modelData.used + "% used · white tick = even pace for this window"
-                                     + (group.data_.plan ? "\nplan: " + group.data_.plan : ""), 500)
-                        : Ui.hideTip(parent)
+                    onContainsMouseChanged: containsMouse ? Ui.showTip(parent, bar.tipText(), 500) : Ui.hideTip(parent)
                 }
             }
             Text {
@@ -107,13 +205,6 @@ Column {
                 text: bar.modelData.left + "% left"
                 font.pixelSize: 12
                 color: Theme.text
-                anchors.verticalCenter: parent.verticalCenter
-            }
-            Text {
-                text: bar.modelData.resets
-                textFormat: Text.PlainText
-                font.pixelSize: 11
-                color: Theme.dim
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
