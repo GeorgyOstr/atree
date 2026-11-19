@@ -68,7 +68,8 @@ Item {
     onMinXChanged: clampSoon()
     onMinYChanged: clampSoon()
     function clampSoon() {
-        if (!fitAnim.running && !glide.running)
+        // before the first content the bounds collapse; a restored view is clamped in firstFit
+        if (initialFitDone && !fitAnim.running && !glide.running)
             panTo(world.x, world.y)
     }
 
@@ -152,6 +153,8 @@ Item {
         initialFitDone = true
         if (!view || !view.saved)
             fit(false)
+        else
+            panTo(world.x, world.y)
     }
     Connections {
         target: backend

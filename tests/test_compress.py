@@ -257,6 +257,43 @@ class Run(HomeCase):
         self.assertEqual(u["errors"], ["kept 'Merged 3: Login cookie fix': it has been continued"])
         self.assertIn(key, self.keys())
 
+    def test_a_merged_talk_nothing_went_into_is_taken_back(self):
+        real = self.ask
+
+        def ask(a, argv, prompt, cwd=None, timeout=None):
+            if "--session-id" in argv:  # every talk goes on while the agent writes
+                for k in ("claude:a", "claude:b"):
+                    with open(self.paths[k], "a") as f:
+                        f.write(jsonl({"type": "user", "timestamp": TS, "message": {"role": "user", "content": "more"}}))
+                with open(self.paths["codex:c"], "a") as f:
+                    f.write(jsonl(codex_msg("user", "more")))
+            return real(a, argv, prompt, cwd, timeout)
+
+        aisearch.ask.side_effect = ask
+        r = compress.compress("claude", self.project)
+        self.assertEqual(r["merged"], [])
+        [err] = r["errors"]
+        self.assertIn("none of its talks could be archived; nothing was merged", err)
+        self.assertEqual(self.keys(), sorted(self.paths))
+        self.assertEqual(ops.archived(), {})
+        self.assertIsNone(compress.last_report())
+
+    def test_undo_keeps_a_merged_talk_an_idle_terminal_has(self):
+        r = compress.compress("claude", self.project)
+        key = r["merged"][0]["key"]
+        with mock.patch.object(BY_NAME["claude"], "live_pid", return_value=4242):
+            u = compress.undo(self.project)
+        self.assertEqual((len(u["restored"]), u["dropped"]), (3, []))
+        self.assertIn(key, self.keys())
+
+    def test_merge_writes_the_index_once_per_source(self):
+        with mock.patch.object(ops, "_save", wraps=ops._save) as save:
+            r = compress.compress("claude", self.project)
+        self.assertEqual(len(r["merged"][0]["from"]), 3)
+        self.assertEqual(save.call_count, 3 + 1)  # each archive, then Undo's start in one write
+        index = ops.archived()
+        self.assertEqual(len({e["merged_at"] for e in index.values()}), 1)
+
     def test_an_answer_without_the_opening_keeps_the_groups_title(self):
         self.answer = "## Goal\nTHE HAND-OVER\n"
         [m] = compress.compress("claude", self.project)["merged"]

@@ -99,6 +99,11 @@ def fmt_tokens(n):
     return str(int(n))
 
 
+def num(v):
+    """``v`` if it is a plain number, else 0."""
+    return v if type(v) in (int, float) else 0
+
+
 def is_timestamp(v):
     if type(v) not in (int, float):
         return False
@@ -149,10 +154,7 @@ def all_text(content):
 
 
 def count_day(days, iso_ts):
-    t = iso_to_epoch(iso_ts)
-    if t:
-        day = local_day(t)
-        days[day] = days.get(day, 0) + 1
+    add_day(days, iso_ts, 1)
 
 
 def add_day(days, iso_ts, n):
@@ -349,8 +351,16 @@ def prune_caches():
 # ---------------------------------------------------------------- moving files
 
 def backup(paths, label):
-    dest = os.path.join(BACKUPS, "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), label))
-    os.makedirs(dest, exist_ok=True)
+    stem = os.path.join(BACKUPS, "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), label))
+    os.makedirs(BACKUPS, exist_ok=True)
+    dest, n = stem, 2
+    while True:  # a second backup in the same second must not overwrite the first
+        try:
+            os.mkdir(dest)
+            break
+        except FileExistsError:
+            dest = "%s-%d" % (stem, n)
+            n += 1
     for p in paths:
         p = os.fspath(p)
         target = os.path.join(dest, os.path.basename(p.rstrip("/")))

@@ -39,9 +39,9 @@ Rectangle {
         selectByMouse: true
         clip: true
         onTextEdited: {
-            // AI results would hide the text filter; editing goes back to it
-            if (backend.ai.busy !== true)
-                backend.clearAi()
+            // AI results would hide the text filter; editing goes back to it (a search still
+            // running is dropped too, so its answer cannot override the new text)
+            backend.clearAi()
             debounce.restart()
         }
         onAccepted: {

@@ -44,11 +44,19 @@ def account_dirs(default_dir):
     return sorted(dirs, key=name_of)
 
 
-def _token(d, now):
+def _creds(d):
+    """An account's saved OAuth credentials (a dict), or None when missing or malformed."""
     try:
         with open(os.path.join(d, ".credentials.json"), "rb") as f:
-            c = json.loads(f.read())["claudeAiOauth"]
-    except (OSError, ValueError, KeyError, TypeError):
+            c = json.loads(f.read())
+    except (OSError, ValueError):
+        return None
+    c = c.get("claudeAiOauth") if isinstance(c, dict) else None
+    return c if isinstance(c, dict) else None
+
+
+def _token(c, now):
+    if c is None:
         return None
     exp = c.get("expiresAt")
     token = c.get("accessToken")
@@ -57,14 +65,11 @@ def _token(d, now):
     return token
 
 
-def _identity(d):
+def _identity(c):
     """Who an account's credentials belong to (a copy of a config dir is the same account)."""
-    try:
-        with open(os.path.join(d, ".credentials.json"), "rb") as f:
-            c = json.loads(f.read())["claudeAiOauth"]
-        return hashlib.sha256(str(c.get("refreshToken") or c.get("accessToken")).encode()).hexdigest()
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    if c is None:
         return None
+    return hashlib.sha256(str(c.get("refreshToken") or c.get("accessToken")).encode()).hexdigest()
 
 
 def _fetch(token):
@@ -116,13 +121,27 @@ def from_statusline(saved, now):
     return bars
 
 
-def account(d, now, fetch=None):
-    """One account's usage, or None when nothing is known about it."""
+def _current(result, now):
+    """``result`` with bars whose window has reset since it was observed shown as reset."""
+    if result is None or not any(b["resets_at"] and b["resets_at"] <= now and not b["stale"]
+                                 for b in result["bars"]):
+        return result
+    bars = [dict(b, used=0.0, stale=True) if b["resets_at"] and b["resets_at"] <= now else b
+            for b in result["bars"]]
+    return dict(result, bars=bars)
+
+
+def account(d, now, fetch=None, creds=None):
+    """One account's usage, or None when nothing is known about it.
+
+    The endpoint is called at most every TTL seconds (BACKOFF after a failure); the status-line
+    file is checked on every call, so newer local limits show up in between."""
+    if creds is None:
+        creds = _creds(d)
     with _lock:
         hit = _cache.get(d)
-    if hit and now - hit[0] < (TTL if hit[2] else BACKOFF):
-        return hit[1]
-    token = _token(d, now)
+    due = hit is None or now - hit[0] >= (TTL if hit[2] else BACKOFF)
+    token = _token(creds, now) if due else None
     if token:
         try:
             bars, credits = from_api((fetch or _fetch)(token), now)
@@ -140,21 +159,22 @@ def account(d, now, fetch=None):
     if saved and (last is None or (saved.get("at") or 0) > (last.get("observed_at") or 0)):
         result = {"name": name_of(d), "bars": from_statusline(saved, now),
                   "credits": last.get("credits") if last else None, "observed_at": saved.get("at")}
-    if token and result is not None:  # the call failed: back off instead of retrying every poll
+    if token:  # the call failed: back off instead of retrying every poll, even with nothing known
         with _lock:
             _cache[d] = (now, result, False)
-    return result
+    return _current(result, now)
 
 
 def all_accounts(default_dir, now=None):
     now = time.time() if now is None else now
     out, owners = [], set()
     for d in account_dirs(default_dir):
-        who = _identity(d)
+        creds = _creds(d)
+        who = _identity(creds)
         if who is not None and who in owners:  # e.g. cp -r ~/.claude ~/.claude-bak
             continue
-        owners.add(who)
-        a = account(d, now)
-        if a is not None:
+        a = account(d, now, creds=creds)
+        if a is not None:  # a copy with nothing known doesn't hide the one with data
+            owners.add(who)
             out.append(a)
     return out

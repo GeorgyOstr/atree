@@ -3,7 +3,10 @@ import QtQuick
 SidePanel {
     id: panel
     objectName: "activityPanel"
-    readonly property var grid: backend.activity
+    // through its text, so the cells are rebuilt only when the counts change, not on every
+    // backend change
+    readonly property string gridJson: JSON.stringify(backend.activity)
+    readonly property var grid: JSON.parse(gridJson)
     readonly property var weeks: grid.weeks || []
     readonly property var tools: grid.tools || []
 

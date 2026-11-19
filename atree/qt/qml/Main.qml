@@ -99,8 +99,8 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "A"
-        enabled: win.keysFree && win.hasCurrent
-        onActivated: win.archiveKeys(backend.actionKeys(win.current.key))
+        enabled: win.keysFree && win.hasCurrent && !win.current.archived
+        onActivated: backend.archive(backend.actionKeys(win.current.key))
     }
     Shortcut {
         sequence: "M"
@@ -136,7 +136,7 @@ ApplicationWindow {
             { text: "Resume in terminal", hint: "Enter", visible: single && !t.archived, run: function () { backend.resume(t.key) } },
             { text: "Copy resume command", hint: "C", visible: single && !t.archived, run: function () { backend.copyResume(t.key) } },
             { text: "Move to folder…", hint: "M", visible: !anyArchived, run: function () { win.openMoveDialog(keys, "") } },
-            { text: "Archive (compress)", hint: "A", danger: true, visible: !anyArchived && !anyLive, run: function () { win.archiveKeys(keys) } },
+            { text: "Archive (compress)", hint: "A", danger: true, visible: !anyArchived && !anyLive, run: function () { backend.archive(keys) } },
             { text: "Restore from archive", visible: anyArchived, run: function () { backend.restore(keys) } },
             { text: "Delete permanently…", danger: true, visible: anyArchived, run: function () { win.openDeleteDialog(keys) } }
         ])
@@ -183,10 +183,6 @@ ApplicationWindow {
         deleteDialog.open()
     }
 
-    function archiveKeys(keys) {
-        backend.archive(keys)
-    }
-
     // ---------------------------------------------------------------- layout
 
     Header {
@@ -216,7 +212,9 @@ ApplicationWindow {
             id: tree
             anchors.fill: parent
             anchors.leftMargin: win.holeLeft
-            treeW: sidebar.x - 12 - win.holeLeft
+            // the details panel may be wider than the sidebar it covers
+            treeW: Math.min(sidebar.x, details.shown ? parent.width - details.width - 12 - win.panelShift
+                                                     : sidebar.x) - 12 - win.holeLeft
             view: viewSettings
             popupsOpen: talkMenu.opened || folderMenu.opened || moveDialog.opened
                         || deleteDialog.opened || win.pickerOpen
@@ -264,7 +262,7 @@ ApplicationWindow {
         property bool anyLive: false
         okText: "Move"
         okEnabled: backend.isDir(pathBox.text)
-        onAcceptedOk: backend.move(keys, backend.expand(pathBox.text))
+        onAcceptedOk: backend.move(keys, pathBox.text)
 
         Text {
             width: parent.width

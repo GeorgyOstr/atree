@@ -49,10 +49,12 @@ def _valid_timer(t):
 
 
 def _read():
+    """(timers, claims); a missing or corrupt file is empty, any other read error raises
+    so that a following write can't replace storage that merely couldn't be read."""
     try:
         with open(FILE, "rb") as f:
             data = json.loads(f.read().decode("utf-8"))
-    except (OSError, ValueError):
+    except (FileNotFoundError, ValueError):
         data = None
     if not isinstance(data, dict):
         data = {}
@@ -67,8 +69,18 @@ def _write(timers, claimed):
     atomic_write(FILE, json.dumps({"timers": timers, "claimed": claimed}, indent=1))
 
 
+def _stamp():
+    try:
+        return os.stat(FILE).st_mtime_ns
+    except OSError:
+        return None
+
+
 def load():
-    return _read()[0]
+    try:
+        return _read()[0]
+    except OSError:
+        return []
 
 
 @contextlib.contextmanager
@@ -83,18 +95,19 @@ def lock():
         os.close(fd)
 
 
-def edit(fn):
+def edit(fn, stamp=False):
+    """Apply ``fn`` to the stored timers; with ``stamp`` also the file's mtime_ns, taken under the lock."""
     with lock():
         timers, claimed = _read()
         result = fn(timers)
         if result is not None:
             timers = result
         _write(timers, claimed)
-        return timers
+        return (timers, _stamp()) if stamp else timers
 
 
-def claim_due(now):
-    """Mark due timers fired; returns (timers this call marked, all timers)."""
+def claim_due(now, stamp=False):
+    """Mark due timers fired; returns (timers this call marked, all timers[, mtime_ns under the lock])."""
     with lock():
         timers, claimed = _read()
         mine = []
@@ -104,7 +117,7 @@ def claim_due(now):
                 mine.append(t)
         if mine:
             _write(timers, claimed)
-        return mine, timers
+        return (mine, timers, _stamp()) if stamp else (mine, timers)
 
 
 def claim_once(key):
@@ -147,7 +160,7 @@ def notify(title, body, sound=True):
     """Desktop notification plus an alarm sound; never blocks, never raises."""
     try:
         if shutil.which("notify-send"):
-            _spawn(["notify-send", "-a", "atree", "-i", "alarm-symbolic", title, body])
+            _spawn(["notify-send", "-a", "atree", "-i", "alarm-symbolic", "--", title, body])
         if not sound:
             return
         if shutil.which("canberra-gtk-play"):

@@ -179,7 +179,7 @@ Item {
             visible: !row.archived && !row.live
             height: 20; width: 22
             text: "⤓"; tip: "Archive (compress)"
-            onClicked: Ui.app.archiveKeys(backend.actionKeys(row.key))
+            onClicked: backend.archive(backend.actionKeys(row.key))
         }
         MiniButton {
             visible: row.archived

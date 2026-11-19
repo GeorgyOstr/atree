@@ -143,8 +143,11 @@ def _tmux(pid, pane_pid, server, title, run):
 def _screen(pid, server, run):
     # screen doesn't tell which process is an attached client, so its window can't be
     # found; -x attaches a detached session and shares one that is attached elsewhere
-    sty = _environ(pid).get("STY") or str(server)
-    run(shlex.join(["screen", "-x", sty]))
+    env = _environ(pid)
+    sty = env.get("STY") or str(server)
+    # the agent's own window, not whichever one the session last showed
+    window = ["-p", env["WINDOW"]] if env.get("WINDOW", "").isdigit() else []
+    run(shlex.join(["screen", "-x", sty] + window))
     return "attaching to its screen session…"
 
 

@@ -61,6 +61,7 @@ class HomeCase(unittest.TestCase):
         for c in (base._cache, base._lines_cache):
             c.clear()
         opencode._state.update(key=None, rows=[])
+        codex._index_cache.update(key=None, value=None)
         self.project = os.path.join(self.home, "project")
         os.makedirs(self.project)
 

@@ -11,6 +11,7 @@ from .agents.base import DATA, tildify
 SEARCH_DIR = os.path.join(DATA, "search")
 TIMEOUT = 180
 MAX_RESULTS = 8
+BUDGET = 400_000       # characters of talk list per search: the newest talks that fit
 
 HEADER = """\
 Below is a list of the user's coding-agent talks, one per line:
@@ -24,17 +25,23 @@ Answer [] if nothing fits. Do not use any tools.
 """
 
 
-def _collapse(text, n):
+def _collapse(text, n=None):
     return " ".join((text or "").split())[:n]
 
 
-def build_prompt(query, candidates):
+def build_prompt(query, candidates, budget=BUDGET):
+    """The question and the talks it is about, newest first while they fit in ``budget``."""
     lines = [HEADER.format(query=query.strip(), n=MAX_RESULTS)]
-    for s in candidates:
-        lines.append("%s | %s | %s | %s | %s | %s" % (
+    used = 0
+    for s in sorted(candidates, key=lambda s: -(s.get("updated") or 0)):
+        line = "%s | %s | %s | %s | %s | %s" % (
             s["key"], s["tool"], tildify(s["cwd"]),
             time.strftime("%Y-%m-%d", time.localtime(s.get("updated") or 0)),
-            _collapse(s.get("title"), 80), _collapse(s.get("first_msg"), 160)))
+            _collapse(s.get("title"), 80), _collapse(s.get("first_msg"), 160))
+        used += len(line) + 1
+        if used > budget:
+            break
+        lines.append(line)
     return "\n".join(lines)
 
 

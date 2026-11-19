@@ -41,10 +41,6 @@ def desktop_files():
         return []
 
 
-def desktop_entries():
-    return len(desktop_files())
-
-
 def icon_positions(paths):
     """Screen positions of icons the user placed by hand (DING keeps them in GIO metadata)."""
     if not paths:

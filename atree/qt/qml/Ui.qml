@@ -14,7 +14,8 @@ QtObject {
     }
 
     function recentChildTap() {
-        return Date.now() - childTapAt < 250
+        var dt = Date.now() - childTapAt
+        return dt >= 0 && dt < 250
     }
 
     function focusCanvas() {

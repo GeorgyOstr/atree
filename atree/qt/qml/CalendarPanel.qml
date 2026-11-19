@@ -231,20 +231,8 @@ SidePanel {
         }
     }
 
-    MouseArea {
-        // the list scrolls first; at its ends the wheel goes on to the sidebar
+    WheelForwarder {
         anchors.fill: flick
-        acceptedButtons: Qt.NoButton
-        onWheel: wheel => {
-            var range = flick.contentHeight - flick.height
-            var touch = wheel.phase !== Qt.NoScrollPhase && wheel.pixelDelta.y !== 0
-            var dy = touch ? wheel.pixelDelta.y : wheel.angleDelta.y / 120 * 90
-            var to = Math.max(0, Math.min(range, flick.contentY - dy))
-            if (range <= 0 || Math.abs(to - flick.contentY) < 0.5) {
-                wheel.accepted = false
-                return
-            }
-            flick.contentY = to
-        }
+        list: flick
     }
 }

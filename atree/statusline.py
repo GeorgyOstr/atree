@@ -2,6 +2,7 @@
 
 Kept light: ``atree.py --statusline`` runs on every status refresh.
 """
+import hashlib
 import json
 import os
 import shlex
@@ -79,7 +80,10 @@ def run():
             atomic_write(limits_path(CLAUDE_DIR), _dump({"at": time.time(), "rate_limits": limits}), 0o600)
         except OSError:
             pass
-    nxt = _load(NEXT)
+    path = next_path(CLAUDE_DIR)
+    nxt = _load(path)
+    if nxt is MISSING and path != NEXT:  # installed before each account had its own file
+        nxt = _load(NEXT)
     command = nxt.get("command") if isinstance(nxt, dict) else None
     if not isinstance(command, str) or not command:
         return 0
@@ -87,13 +91,27 @@ def run():
     return subprocess.run(command, shell=True, input=data, env=env).returncode
 
 
+def _is_default(config_dir):
+    default = os.path.join(os.path.expanduser("~"), ".claude")  # HOME now, not at import
+    return os.path.realpath(config_dir) == os.path.realpath(default)
+
+
 def limits_path(config_dir):
     """Each account (CLAUDE_CONFIG_DIR) keeps its own file; ~/.claude keeps the original name."""
-    default = os.path.join(os.path.expanduser("~"), ".claude")  # HOME now, not at import
-    if os.path.realpath(config_dir) == os.path.realpath(default):
+    if _is_default(config_dir):
         return LIMITS
     name = os.path.basename(os.path.normpath(config_dir)).lstrip(".") or "account"
     return os.path.join(CACHE, "claude-limits-%s.json" % name)
+
+
+def next_path(config_dir):
+    """Where the status line atree displaced from an account is kept: one file per config dir,
+    so installing for one account doesn't overwrite another's; ~/.claude keeps the original name."""
+    if _is_default(config_dir):
+        return NEXT
+    name = os.path.basename(os.path.normpath(config_dir)).lstrip(".") or "account"
+    tag = hashlib.sha256(os.path.realpath(config_dir).encode()).hexdigest()[:8]
+    return os.path.join(DATA, "statusline-next-%s-%s.json" % (name, tag))
 
 
 def limits(path=None):
@@ -134,7 +152,7 @@ def install(command):
         nxt = {"command": prev or None}
         if original is not MISSING:
             nxt["statusLine"] = original
-        atomic_write(NEXT, _dump(nxt), 0o600)
+        atomic_write(next_path(CLAUDE_DIR), _dump(nxt), 0o600)
         if raw is not None:
             atomic_write(BACKUP, raw, 0o600)
         shown = prev
@@ -156,12 +174,13 @@ def uninstall():
         if not isinstance(line, dict) or not is_ours(line.get("command")):
             print("atree isn't in Claude Code's status line")
             return 0
-        nxt = _strict(NEXT, None)
+        nxt_path = next_path(CLAUDE_DIR)
+        nxt = _strict(nxt_path, None)
     except _Invalid as e:
         print(e, file=sys.stderr)
         return 1
     if nxt is not None and "command" in nxt and not (nxt["command"] is None or isinstance(nxt["command"], str)):
-        print("%s has an invalid command: fix it and run this again" % NEXT, file=sys.stderr)
+        print("%s has an invalid command: fix it and run this again" % nxt_path, file=sys.stderr)
         return 1
     prev = (nxt or {}).get("command") or None
     if nxt is not None and "statusLine" in nxt:
@@ -179,11 +198,11 @@ def uninstall():
             settings.pop("statusLine", None)
             msg = "removed atree from Claude Code's status line"
             if nxt is None:
-                msg += "; %s is missing and %s has none to restore" % (NEXT, BACKUP)
+                msg += "; %s is missing and %s has none to restore" % (nxt_path, BACKUP)
     atomic_write(SETTINGS, _dump(settings), 0o600)
     if nxt is not None:
         try:
-            os.unlink(NEXT)
+            os.unlink(nxt_path)
         except FileNotFoundError:
             pass
     print(msg)

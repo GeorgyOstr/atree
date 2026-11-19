@@ -92,6 +92,30 @@ test('R-ext-7/8: exit respawns after 5 s; disable cancels and stops', () => {
     assert.equal(w.launches.length, 2);
 });
 
+test('a widget that keeps dying at start is respawned less and less often', () => {
+    const w = withConfig(GOOD);
+    const ext = w.make();
+    ext.enable();
+    const waits = [];
+    for (let i = 0; i < 8; i++) {
+        const n = w.launches.length;
+        w.procs[n - 1].exit();
+        let waited = 0;
+        while (w.launches.length === n) {
+            w.advance(1000);
+            waited += 1000;
+        }
+        waits.push(waited / 1000);
+    }
+    assert.deepEqual(waits, [5, 10, 20, 40, 80, 160, 300, 300]);
+    // a long run starts over at 5 s
+    w.advance(60000);
+    w.procs[w.launches.length - 1].exit();
+    w.advance(5000);
+    assert.equal(w.launches.length, 10);
+    ext.disable();
+});
+
 test('R-ext-9: foreign, transient and non-normal windows are ignored', () => {
     const w = withConfig(GOOD);
     const ext = w.make();

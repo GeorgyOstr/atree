@@ -201,6 +201,23 @@ class Install(HomeCase):
             self.assertEqual(self.settings(), original)
             self.assertFalse(os.path.exists(statusline.NEXT))
 
+    def test_each_account_keeps_its_own_displaced_command(self):
+        self.put_settings({"statusLine": {"type": "command", "command": "cmd-a"}})
+        self.assertEqual(self.call(statusline.install, OURS)[0], 0)
+        other = self.path(".claude1")
+        with mock.patch.object(statusline, "CLAUDE_DIR", other), \
+                mock.patch.object(statusline, "SETTINGS", os.path.join(other, "settings.json")), \
+                mock.patch.object(statusline, "BACKUP", os.path.join(other, "settings.json.atree-backup")):
+            self.assertEqual(self.call(statusline.install, OURS)[0], 0)
+            mine = statusline.next_path(other)
+            self.assertNotEqual(mine, statusline.NEXT)
+            self.assertEqual(json.loads(read(mine)), {"command": None})
+            self.assertEqual(self.call(statusline.uninstall)[0], 0)
+            self.assertFalse(os.path.exists(mine))
+        self.assertEqual(json.loads(read(statusline.NEXT))["command"], "cmd-a")
+        self.assertEqual(self.call(statusline.uninstall)[0], 0)
+        self.assertEqual(self.settings(), {"statusLine": {"type": "command", "command": "cmd-a"}})
+
     def test_R_sl_12_other_kinds(self):
         for original in ({"type": "static", "text": "hi", "padding": 2}, {"command": "untyped"}, "plain string", None):
             self.put_settings({"other": True, "statusLine": original})

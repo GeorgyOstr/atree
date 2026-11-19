@@ -20,6 +20,7 @@ class Stub(Agent):
         self.base_dir = base_dir
         self.after_archive = mock.Mock()
         self.after_restore = mock.Mock()
+        self.live_pid = mock.Mock(return_value=None)
 
     def archive_members(self, s):
         return self.base_dir, [os.path.join(self.base_dir, "session")]
@@ -177,6 +178,78 @@ class Archive(StubCase):
         self.agent.can_archive = False
         with self.assertRaisesRegex(OpError, "archiving Stub talks isn't supported"):
             ops.archive("stub:s1")
+
+
+class Guards(StubCase):
+    def test_an_idle_terminal_still_counts_as_running(self):
+        self.agent.live_pid.return_value = 4242  # not "live" by the file's age, but a process has it
+        with self.assertRaisesRegex(OpError, "is running"):
+            ops.archive("stub:s1")
+        self.agent.can_move = True
+        with self.assertRaisesRegex(OpError, "is running"):
+            ops.move("stub:s1", self.home)
+        self.assertTrue(os.path.exists(self.transcript))
+        ops.archive("stub:s1", idle=True)  # the caller vouches no process has it
+
+    def test_expected_stamp(self):
+        with self.assertRaisesRegex(OpError, "changed meanwhile"):
+            ops.archive("stub:s1", expect=(1.0, 10))
+        self.assertTrue(os.path.exists(self.transcript))
+        ops.archive("stub:s1", expect=ops.stamp(self.talk), note={"merged_into": "stub:m"})
+        self.assertEqual(ops.archived()["stub:s1"]["merged_into"], "stub:m")
+
+    def test_written_during_the_index_update_keeps_the_originals(self):
+        def append(s):
+            with open(self.transcript, "a") as f:
+                f.write("late\n")
+        self.agent.after_archive.side_effect = append
+        with self.assertRaisesRegex(OpError, "changed while it was archived; nothing was removed"):
+            ops.archive("stub:s1")
+        self.assertTrue(read(self.transcript, "r").endswith("late\n"))
+        self.assertEqual(ops.archived(), {})
+        self.agent.after_restore.assert_called_once()
+        self.assertEqual(sorted(os.listdir(ops.ARCHIVE_DIR)), ["index.json", "older.tar.gz"])
+
+    def test_unreadable_index_is_never_overwritten(self):
+        for junk in (b"{", b"[]"):
+            with self.subTest(junk):
+                write(ops.ARCHIVE_INDEX, junk)
+                with self.assertRaisesRegex(OpError, "archive index"):
+                    ops.archive("stub:s1")
+                self.assertEqual(read(ops.ARCHIVE_INDEX), junk)
+                self.assertTrue(os.path.exists(self.transcript))
+        os.unlink(ops.ARCHIVE_INDEX)
+        self.assertEqual(ops.archived(), {})
+
+    def test_failed_delete_keeps_the_entry(self):
+        out = ops.archive("stub:s1")
+        with mock.patch.object(ops.os, "unlink", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                ops.delete_archived("stub:s1")
+        self.assertIn("stub:s1", ops.archived())
+        os.unlink(out)  # gone meanwhile: deleting still drops the entry
+        self.assertEqual(ops.delete_archived("stub:s1"), out)
+        self.assertEqual(ops.archived(), {})
+
+    def test_failed_index_write_on_restore_can_be_retried(self):
+        ops.archive("stub:s1")
+        real = ops._save
+        with mock.patch.object(ops, "_save", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OpError, "disk full"):
+                ops.restore("stub:s1")
+        self.assertFalse(os.path.exists(self.session))
+        self.assertIn("stub:s1", ops.archived())
+        with mock.patch.object(ops, "_save", side_effect=real):
+            self.assertEqual(ops.restore("stub:s1"), self.transcript)
+        self.assertTrue(os.path.exists(self.transcript))
+
+    def test_annotate_all_writes_once(self):
+        ops.archive("stub:s1")
+        with mock.patch.object(ops, "_save", wraps=ops._save) as save:
+            ops.annotate_all(["stub:s1", "stub:nope"], merged_at=5.0)
+            ops.annotate_all(["stub:nope"], merged_at=6.0)
+        self.assertEqual(save.call_count, 1)
+        self.assertEqual(ops.archived()["stub:s1"]["merged_at"], 5.0)
 
 
 class Restore(StubCase):
@@ -351,6 +424,15 @@ class Resume(HomeCase):
             self.assertEqual(ops.open_terminal("claude:claude-fixture"), "opening terminal…")
         run2.assert_called_once_with(self.project, "claude --resume claude-fixture")
 
+    def test_open_terminal_finds_a_process_for_a_talk_that_looks_idle(self):
+        make_all(self.home, self.project)
+        with mock.patch.object(ops, "run_in_terminal") as run, \
+                mock.patch.object(ops.BY_NAME["codex"], "live_pid", return_value=4242), \
+                mock.patch.object(reattach, "reattach", return_value="raised its terminal window") as re:
+            self.assertEqual(ops.open_terminal("codex:codex-fixture"), "raised its terminal window")
+        self.assertEqual(re.call_args[0][0], 4242)
+        run.assert_not_called()
+
 
 class FakeProc(HomeCase):
     """A /proc tree: agent 100 under shell 90 under ``top`` (pid 80), under systemd (pid 1)."""
@@ -458,6 +540,10 @@ class FakeProc(HomeCase):
         self.tree("screen", env={"STY": "80.work"})
         self.assertEqual(reattach.reattach(100, "t", self.run), "attaching to its screen session…")
         self.run.assert_called_once_with("screen -x 80.work")
+        self.run.reset_mock()
+        self.tree("screen", env={"STY": "80.work", "WINDOW": "3"})  # shown in its own window
+        reattach.reattach(100, "t", self.run)
+        self.run.assert_called_once_with("screen -x 80.work -p 3")
 
     def test_session_pid_by_argument_or_open_transcript(self):
         self.proc_entry(200, "codex", 1, cmdline=("codex", "resume", "abc-1"))

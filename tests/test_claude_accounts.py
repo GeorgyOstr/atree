@@ -87,6 +87,59 @@ class Fixes(unittest.TestCase):
             got = claude_usage.all_accounts(self.dir, NOW)
         self.assertEqual([a["name"] for a in got], ["claude-bak"])
 
+    def creds(self, d, oauth):
+        import json
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, ".credentials.json"), "w") as f:
+            json.dump({"claudeAiOauth": oauth}, f)
+
+    def test_malformed_credentials_fall_back_to_the_status_line(self):
+        from unittest import mock
+        self.creds(self.dir, None)
+        saved = {"at": NOW, "rate_limits": {"seven_day": {"used_percentage": 7}}}
+        with mock.patch("atree.statusline.limits", return_value=saved):
+            got = claude_usage.all_accounts(self.dir, NOW)
+        self.assertEqual([b["used"] for b in got[0]["bars"]], [7.0])
+
+    def test_a_window_that_reset_since_the_reply_shows_as_reset(self):
+        reply = lambda token: {"five_hour": {"utilization": 80.0, "resets_at": NOW + 600}}
+        claude_usage.account(self.dir, NOW, reply)
+        self.creds(self.dir, {"accessToken": "t", "refreshToken": "r", "expiresAt": NOW * 1000})
+        for at in (NOW + 601, NOW + 3600):  # still in the TTL, then token expired
+            bar, = claude_usage.account(self.dir, at)["bars"]
+            self.assertEqual((bar["used"], bar["stale"]), (0.0, True))
+
+    def test_backing_off_still_reads_newer_status_line(self):
+        from unittest import mock
+        def down(token):
+            raise OSError("rate limited")
+        claude_usage.account(self.dir, NOW, lambda token: {"seven_day": {"utilization": 10.0}})
+        claude_usage.account(self.dir, NOW + claude_usage.TTL + 1, down)
+        saved = {"at": NOW + 300, "rate_limits": {"seven_day": {"used_percentage": 20}}}
+        with mock.patch("atree.statusline.limits", return_value=saved):
+            got = claude_usage.account(self.dir, NOW + 400, down)
+        self.assertEqual([b["used"] for b in got["bars"]], [20.0])
+
+    def test_failure_with_nothing_known_backs_off(self):
+        calls = []
+        def down(token):
+            calls.append(1)
+            raise OSError("offline")
+        self.assertIsNone(claude_usage.account(self.dir, NOW, down))
+        self.assertIsNone(claude_usage.account(self.dir, NOW + 60, down))
+        self.assertEqual(len(calls), 1)
+
+    def test_a_copy_with_no_data_does_not_hide_the_account(self):
+        import shutil
+        from unittest import mock
+        self.creds(self.dir, {"accessToken": "t", "refreshToken": "r", "expiresAt": NOW * 1000})
+        shutil.copytree(self.dir, os.path.join(self.root, ".claude-bak"))
+        saved = {"at": NOW, "rate_limits": {"seven_day": {"used_percentage": 5}}}
+        only_primary = lambda path=None: saved if path and "bak" not in path else None
+        with mock.patch("atree.statusline.limits", only_primary):
+            got = claude_usage.all_accounts(self.dir, NOW)
+        self.assertEqual([a["name"] for a in got], ["claude1"])
+
     def test_credits_total_per_currency(self):
         accounts = [{"name": "a", "bars": [], "credits": {"used": 1, "limit": 10, "currency": "EUR"}},
                     {"name": "b", "bars": [], "credits": {"used": 0, "limit": 10, "currency": "USD"}}]

@@ -63,7 +63,18 @@ def _save(path, data):
 
 
 def archived():
-    return _load(ARCHIVE_INDEX, {})
+    """The archive index. Missing means empty; one that can't be read is an error, since
+    saving over it would lose track of every archive it lists."""
+    try:
+        with open(ARCHIVE_INDEX, "rb") as f:
+            index = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise OpError("the archive index %s can't be read: %s" % (ARCHIVE_INDEX, e)) from e
+    if not isinstance(index, dict):
+        raise OpError("the archive index %s is not a JSON object" % ARCHIVE_INDEX)
+    return index
 
 
 def _find(key):
@@ -71,6 +82,12 @@ def _find(key):
         if s["key"] == key:
             return s
     raise OpError("session %s not found" % key)
+
+
+def _running(agent, s):
+    """``s`` has a process: its live flag, or for agents that only guess it from the file's
+    age, a process found running it (a terminal left idle still holds the talk)."""
+    return bool(s.get("live") or agent.live_pid(s))
 
 
 def _agent(name):
@@ -91,7 +108,7 @@ def move(key, target):
         agent = _agent(s["tool"])
         if not agent.can_move:
             raise OpError("moving %s talks isn't supported" % agent.label)
-        if s["live"]:
+        if _running(agent, s):
             raise OpError("'%s' is running; close it before moving" % s["title"])
         if s["cwd"] == target:
             return "unchanged"
@@ -172,15 +189,24 @@ def _remove(path):
             pass
 
 
-def archive(key, idle=False):
+def stamp(s):
+    """What tells that a talk changed: when it was last written and its size."""
+    return s.get("updated"), s.get("size")
+
+
+def archive(key, idle=False, expect=None, note=None):
     """Pack talk ``key`` away. ``idle``: the caller checked that no process runs it, so a
-    talk that only looks live (some agents go by how recently the file changed) may go."""
+    talk that only looks live (some agents go by how recently the file changed) may go.
+    ``expect``: the talk's stamp() as the caller saw it; it is kept if it changed since.
+    ``note``: fields to keep on its index entry."""
     with op_lock():
         s = _find(key)
         agent = _agent(s["tool"])
         if not agent.can_archive:
             raise OpError("archiving %s talks isn't supported" % agent.label)
-        if s["live"] and not idle:
+        if expect is not None and stamp(s) != tuple(expect):
+            raise OpError("'%s' changed meanwhile and stays where it is" % s["title"])
+        if not idle and _running(agent, s):
             raise OpError("'%s' is running; close it before archiving" % s["title"])
         index = archived()
         if key in index:
@@ -202,14 +228,21 @@ def archive(key, idle=False):
             if packed != files or _snapshot(base_dir, members) != before:
                 raise OpError("archive of %s doesn't match its files; nothing was removed" % key)
             os.rename(tmp, out)
-            index[key] = dict(s, archive=out, base=base_dir, archived_at=time.time(),
+            index[key] = dict(s, **(note or {}), archive=out, base=base_dir, archived_at=time.time(),
                               orig_size=s["size"], size=os.path.getsize(out))
             _save(ARCHIVE_INDEX, index)
+            hooked = False
             try:
                 agent.after_archive(s)
+                hooked = True
+                # written to while the index and the agent's own records were updated
+                if _snapshot(base_dir, members) != before:
+                    raise OpError("%s changed while it was archived; nothing was removed" % key)
             except BaseException:
                 index.pop(key, None)
                 _save(ARCHIVE_INDEX, index)
+                if hooked:
+                    agent.after_restore(s)
                 raise
         except BaseException:
             for p in (tmp, out):
@@ -228,10 +261,17 @@ def archive(key, idle=False):
 
 def annotate(key, **fields):
     """Note ``fields`` on an archived talk's index entry."""
+    annotate_all([key], **fields)
+
+
+def annotate_all(keys, **fields):
+    """Note ``fields`` on the index entries of the archived talks ``keys``, in one write."""
     with op_lock():
         index = archived()
-        if isinstance(index.get(key), dict):
-            index[key].update(fields)
+        found = [k for k in keys if isinstance(index.get(k), dict)]
+        for k in found:
+            index[k].update(fields)
+        if found:
             _save(ARCHIVE_INDEX, index)
 
 
@@ -268,6 +308,8 @@ def restore(key):
                         created.append(dest)
                         tar.extract(m, base_dir, filter="data")
                 agent.after_restore(entry)
+                index.pop(key, None)
+                _save(ARCHIVE_INDEX, index)  # failing, the extracted files go: a retry can work
             except BaseException:
                 for dest in reversed(created):
                     try:
@@ -282,8 +324,6 @@ def restore(key):
             raise
         except (OSError, tarfile.TarError) as e:
             raise OpError("restoring %s failed: %s" % (key, e)) from e
-        index.pop(key, None)
-        _save(ARCHIVE_INDEX, index)
         try:
             os.unlink(entry["archive"])
         except FileNotFoundError:
@@ -297,11 +337,12 @@ def delete_archived(key):
         entry = index.pop(key, None)
         if entry is None:
             raise OpError("%s is not archived" % key)
-        _save(ARCHIVE_INDEX, index)
+        # the file first: if it can't go, the entry still shows it and a retry can work
         try:
             os.unlink(entry["archive"])
         except FileNotFoundError:
             pass
+        _save(ARCHIVE_INDEX, index)
         return entry["archive"]
 
 
@@ -314,10 +355,12 @@ def resume_command(key, s=None):
     return s["cwd"], _agent(s["tool"]).resume_command(s)
 
 
-def open_terminal(key):
+def open_terminal(key, s=None):
     """Resume a talk; one still running is shown where it runs instead of started twice."""
-    s = _find(key)
-    pid = _agent(s["tool"]).live_pid(s) if s.get("live") else None
+    s = s or _find(key)
+    # asked even when the talk doesn't look live: some agents only guess that from the
+    # file's age, and a terminal left idle still runs the talk
+    pid = _agent(s["tool"]).live_pid(s)
     if pid:
         cwd = s["cwd"] if os.path.isdir(s["cwd"]) else base.HOME
         status = reattach.reattach(pid, s["title"], lambda cmd: run_in_terminal(cwd, cmd))
@@ -356,7 +399,7 @@ def _real_name(exe):
     return name[:-8] if name.endswith(".wrapper") else name
 
 
-def _known(name, cwd, argv, script):
+def _known(name, cwd, argv):
     if name == "ptyxis":
         return ["ptyxis", "--new-window", "--working-directory", cwd, "--"] + argv
     if name == "gnome-terminal":
@@ -402,12 +445,12 @@ def run_in_terminal(cwd, cmd):
     candidates = []
     default = _default_terminal()
     if default:
-        candidates.append(_known(_real_name(default[0]), cwd, argv, script) or default + argv)
+        candidates.append(_known(_real_name(default[0]), cwd, argv) or default + argv)
     fallback = shutil.which("x-terminal-emulator")
-    candidates += [(_known(_real_name(fallback), cwd, argv, script) if fallback else None)
+    candidates += [(_known(_real_name(fallback), cwd, argv) if fallback else None)
                    or ["x-terminal-emulator", "-e"] + argv,
-                   _known("ptyxis", cwd, argv, script),
-                   _known("gnome-terminal", cwd, argv, script)]
+                   _known("ptyxis", cwd, argv),
+                   _known("gnome-terminal", cwd, argv)]
     for c in candidates:
         if shutil.which(c[0]):
             proc = subprocess.Popen(c, cwd=cwd, stdin=subprocess.DEVNULL, start_new_session=True)

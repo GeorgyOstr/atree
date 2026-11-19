@@ -93,6 +93,27 @@ class Assistant(HomeCase):
             assistant.open_terminal("codex", [])
         self.assertEqual([c.args[1] for c in run.call_args_list], ["claude --continue", "claude", "codex"])
 
+    def test_open_terminal_shows_a_running_assistant_instead_of_continuing_it(self):
+        own = base.talk("claude", "own", cwd=assistant.AGENT_DIR, live=True, updated=2)
+        older = base.talk("claude", "older", cwd=assistant.AGENT_DIR, updated=1)
+        with mock.patch.object(ops, "run_in_terminal") as run, \
+                mock.patch.object(ops, "open_terminal", return_value="raised its terminal window") as show:
+            self.assertEqual(assistant.open_terminal("claude", [older, own]), "raised its terminal window")
+        show.assert_called_once_with("claude:own", own)
+        run.assert_not_called()
+
+    def test_tree_lists_a_talk_still_on_disk_once(self):
+        make_all(self.home, self.project)
+        from atree.scan import scan_all
+        s = next(s for s in scan_all() if s["key"] == "claude:claude-fixture")
+        ops._save(ops.ARCHIVE_INDEX, {s["key"]: dict(s, archive="/gone.tar.gz"),
+                                      "claude:old": dict(s, id="old", archive="/old.tar.gz")})
+        assistant.write_context()
+        rows = json.loads(read(os.path.join(assistant.AGENT_DIR, "tree.json")))["talks"]
+        mine = [r for r in rows if r["key"] == "claude:claude-fixture"]
+        self.assertEqual([r["archived"] for r in mine], [False])
+        self.assertIn("claude:old", {r["key"] for r in rows})
+
 
 class Cli(HomeCase):
     def test_usage_and_errors(self):
@@ -125,6 +146,16 @@ class Cli(HomeCase):
 
 
 class AiSearch(HomeCase):
+    def test_prompt_keeps_to_its_budget_newest_first(self):
+        talks = [base.talk("claude", "t%03d" % i, title="talk %d" % i, cwd=self.project, updated=i)
+                 for i in range(200)]
+        full = aisearch.build_prompt("q", talks)
+        self.assertEqual(sum("| talk " in l for l in full.split("\n")), 200)
+        cut = aisearch.build_prompt("q", talks, budget=len(full) // 4)
+        kept = [l.split(" | ")[0] for l in cut.split("\n") if "| talk " in l]
+        self.assertTrue(0 < len(kept) < 200)
+        self.assertEqual(kept, ["claude:t%03d" % i for i in range(199, 199 - len(kept), -1)])
+
     def sessions(self):
         return [base.talk("claude", "a", title="Fix login", cwd=self.project),
                 base.talk("codex", "b", title="Old", archived=True)]

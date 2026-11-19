@@ -140,10 +140,6 @@ def _start_time(pid):
         return None
 
 
-def running(folder):
-    return running_pid(folder) is not None
-
-
 def running_pid(folder):
     for lock in glob.glob(os.path.join(glob.escape(folder), "inuse.*.lock")):
         parts = os.path.basename(lock).split(".")
@@ -189,7 +185,7 @@ class Copilot(Agent):
                 continue
             ws = _workspace(d.path)
             sid = ws.get("id") or d.name
-            live = running(d.path)
+            live = running_pid(d.path) is not None
             talks.append(base.talk(
                 "copilot", sid, cwd=ws.get("cwd") or ev["cwd"] or "/",
                 title=base.pick_title(ws.get("name"), ws.get("summary"), ev["first_msg"][:80], sid=sid),

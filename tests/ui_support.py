@@ -195,7 +195,8 @@ class FakeAgenda(QObject):
 class View:
     """Main.qml loaded with a backend, plus helpers to find and poke items."""
 
-    def __init__(self, backend, widget=False, timers=None, agenda=None, size=(1500, 950)):
+    def __init__(self, backend, widget=False, timers=None, agenda=None, size=(1500, 950),
+                 stored_view=None):
         from atree.qt import app as app_mod
         self.backend = backend
         self.timers = timers or FakeTimers()
@@ -204,6 +205,8 @@ class View:
         from PySide6.QtCore import QSettings
         stored = QSettings(_app.organizationName(), _app.applicationName())
         stored.remove("view")
+        for k, val in (stored_view or {}).items():
+            stored.setValue("view/" + k, val)
         stored.sync()
         self.warnings = []
         self.engine = app_mod.make_engine(backend, widget, self.timers, self.agenda)

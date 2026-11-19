@@ -6,6 +6,9 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const RESPAWN_SECONDS = 5;
+// a widget that dies this soon after starting is failing to start: wait longer each time
+const QUICK_EXIT_MS = 10000;
+const MAX_RESPAWN_SECONDS = 300;
 const RECHECK_MS = 1000;
 const MAX_TRIES = 5;
 
@@ -157,6 +160,7 @@ export default class AtreeDesktop extends Extension {
             this._client = null;
             return;
         }
+        this._spawnedAt = nowMs();
         const wait = new Gio.Cancellable();
         this._wait = wait;
         this._proc.wait_async(wait, (proc, res) => {
@@ -176,7 +180,9 @@ export default class AtreeDesktop extends Extension {
         this._proc = null;
         this._client = null;
         this._wait = null;
-        this._respawnId = GLib.timeout_add_seconds(GLib.PRIORITY_LOW, RESPAWN_SECONDS, () => {
+        this._quickExits = nowMs() - this._spawnedAt < QUICK_EXIT_MS ? (this._quickExits ?? 0) + 1 : 0;
+        const delay = Math.min(MAX_RESPAWN_SECONDS, RESPAWN_SECONDS * 2 ** Math.max(0, this._quickExits - 1));
+        this._respawnId = GLib.timeout_add_seconds(GLib.PRIORITY_LOW, delay, () => {
             this._respawnId = 0;
             this._spawn();
             return GLib.SOURCE_REMOVE;

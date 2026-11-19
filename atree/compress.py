@@ -82,8 +82,7 @@ def _norm(path):
     return "/" + "/".join(p for p in str(path or "").split("/") if p)
 
 
-def _collapse(text, n):
-    return " ".join((text or "").split())[:n]
+_collapse = aisearch._collapse
 
 
 def _name(s):
@@ -279,8 +278,17 @@ def report(text):
             "lessons": [l for l in (_plain(l, 240) for l in out["lessons"]) if l][:MAX_LESSONS]}
 
 
-def _stamp(s):
-    return s.get("updated"), s.get("size")
+_stamp = ops.stamp
+
+
+def _drop(key):
+    """Take back a merged talk that nothing went into."""
+    try:
+        ops.archive(key, idle=True)
+        ops.delete_archived(key)
+    except Exception as e:
+        return ["the merged talk %s stays: %s" % (key, str(e) or type(e).__name__)]
+    return []
 
 
 def merge(a, folder, group):
@@ -306,26 +314,31 @@ def merge(a, folder, group):
     new = after.get(key) if new_id else None
     if new is None:
         raise OpError("'%s': %s answered but kept no talk; nothing was archived" % (title, a.label))
-    if _norm(new["cwd"]) != _norm(folder) and a.can_move:
-        ops.move(key, folder)
     done, sources, errors = [], [], []
-    for s in talks:
-        if _stamp(after.get(s["key"]) or {}) != _stamp(s):
-            errors.append("'%s' changed meanwhile and stays where it is" % _name(s))
-            continue
-        try:
-            ops.archive(s["key"])
-            ops.annotate(s["key"], merged_into=key, merged_at=time.time())
-            done.append(s["key"])
-            sources.append(_name(s))
-        except Exception as e:
-            errors.append(str(e) or type(e).__name__)
-            if s["key"] in ops.archived():  # indexed, but removing the original failed: undo must see it
-                ops.annotate(s["key"], merged_into=key, merged_at=time.time())
+    try:
+        if _norm(new["cwd"]) != _norm(folder) and a.can_move:
+            ops.move(key, folder)
+        for s in talks:
+            if _stamp(after.get(s["key"]) or {}) != _stamp(s):
+                errors.append("'%s' changed meanwhile and stays where it is" % _name(s))
+                continue
+            try:
+                # checked again under the lock: archived only as the agent read it
+                ops.archive(s["key"], expect=_stamp(s), note={"merged_into": key, "merged_at": time.time()})
+                done.append(s["key"])
+                sources.append(_name(s))
+            except Exception as e:
+                errors.append(str(e) or type(e).__name__)
+    finally:
+        if not done:  # nothing went in, so no Undo would find this talk: take it back
+            errors += _drop(key)
+    if not done:
+        raise OpError("'%s': none of its talks could be archived; nothing was merged (%s)"
+                      % (title, "; ".join(errors)))
     # the agent has read the talks by now: its title says what they are better than the grouping's
     rep = report(out)
     title = rep["title"] or title
-    name = "Merged %d: %s" % (len(done) or len(talks), title)
+    name = "Merged %d: %s" % (len(done), title)
     try:
         ops.rename(key, name)
     except Exception as e:
@@ -365,10 +378,7 @@ def compress(agent, folder, sessions=None, note=None):
         merged.append(m)
     if merged:
         # Undo's window starts when the whole compression is done, not when its first group was
-        end = time.time()
-        for m in merged:
-            for k in m["from"]:
-                ops.annotate(k, merged_at=end)
+        ops.annotate_all([k for m in merged for k in m["from"]], merged_at=time.time())
         _save_report(a, folder, merged, errors)
     return {"merged": merged, "errors": errors}
 
@@ -452,12 +462,13 @@ def undo(folder, now=None):
         s = current.get(key)
         if s is None:
             continue
-        # "live" can be a guess from the file's age, and this talk is minutes old: ask for a process
-        if (s.get("prompts") or 0) > 1 or (s.get("live") and BY_NAME[s["tool"]].live_pid(s)):
+        # "live" can be a guess from the file's age (an idle terminal doesn't count): ask for a process
+        if (s.get("prompts") or 0) > 1 or BY_NAME[s["tool"]].live_pid(s):
             errors.append("kept '%s': it has been continued" % _name(s))
             continue
         try:
-            ops.archive(key, idle=True)
+            # expect: a prompt typed since the check above keeps it too
+            ops.archive(key, idle=True, expect=_stamp(s))
             ops.delete_archived(key)
             dropped.append(key)
         except Exception as e:

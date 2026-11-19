@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 import shutil
-import time
 
 from . import base
 from .base import Agent, OpError
@@ -50,8 +49,15 @@ def _prompt(line):
     rec = _loads(line)
     if not isinstance(rec, dict) or rec.get("type") != "user" or rec.get("isSidechain"):
         return None, ""
-    text = base.message_text(rec.get("message")).strip()
-    if not text or text.startswith("<"):
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    # injected context (<command-name>, <ide_selection>, ...) comes as blocks starting with '<'
+    blocks = [content] if isinstance(content, str) else [
+        p.get("text") for p in content if isinstance(p, dict) and p.get("type") == "text"
+    ] if isinstance(content, list) else []
+    text = "\n".join(t.strip() for t in blocks
+                     if isinstance(t, str) and t.strip() and not t.strip().startswith("<"))
+    if not text:
         return None, ""
     return rec, text
 
@@ -221,12 +227,14 @@ class Claude(Agent):
         rec = json.dumps({"type": "custom-title", "customTitle": title, "sessionId": s["id"]},
                          separators=(",", ":"))
         try:
-            with open(s["path"], "rb+") as f:
+            with open(s["path"], "rb") as f:
                 end = f.seek(0, 2)
                 if end:
                     f.seek(end - 1)
                     if f.read(1) != b"\n":
                         rec = "\n" + rec
+            # O_APPEND: a line Claude Code adds meanwhile is not overwritten
+            with open(s["path"], "ab") as f:
                 f.write((rec + "\n").encode())
         except OSError as e:
             raise OpError("can't rename '%s': %s" % (s["title"], e)) from e
@@ -263,14 +271,19 @@ class Claude(Agent):
                 if info["first_msg"] is None and info["ai"] is None and sid not in live:
                     continue
                 parsed.append((sid, path, proj.name, info, st))
+        # a forked talk repeats its parent's messages: each message belongs to, and its tokens
+        # count in, the earliest talk only
+        ordered = sorted(parsed, key=lambda p: (p[3]["first"] or "", p[0]))
+        needed = {p[3]["ext_parent"] for p in parsed} - {None}
         owner = {}
-        for sid, _p, _n, info, _st in parsed:
-            for u in info["uuids"]:
-                owner.setdefault(u, sid)
-        # a forked talk repeats its parent's messages: each message's tokens count in the
-        # earliest talk only
+        for sid, _p, _n, info, _st in ordered:
+            if not needed:
+                break
+            for u in needed & info["uuids"]:
+                owner[u] = sid
+            needed -= info["uuids"]
         tdays, counted = {}, set()
-        for sid, _p, _n, info, _st in sorted(parsed, key=lambda p: (p[3]["first"] or "", p[0])):
+        for sid, _p, _n, info, _st in ordered:
             own = dict(info["tdays"])
             for mid, (day, n) in info["mids"].items():
                 if mid in counted:

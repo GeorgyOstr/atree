@@ -183,6 +183,30 @@ class TreeTest(unittest.TestCase):
         self.assertEqual(len(xs), 3)
         self.assertEqual(len([l for l in out.links]), 1)
 
+    def test_collapsed_grid_columns_are_as_wide_as_their_cards(self):
+        talks = [S.talk("t%d" % i, "/w/c%d" % i, NOW - 40 * DAY - i) for i in range(4)]
+        out = lay(talks, filters={"age": 0}, dirs={"/w": False})
+        cards = sorted((n for n in out.nodes if n["kind"] == "card"), key=lambda n: n["nx"])
+        self.assertTrue(all(n["collapsed"] for n in cards))
+        first_col = [n for n in cards if n["nx"] == cards[0]["nx"]]
+        gap = cards[-1]["nx"] - cards[0]["nx"]
+        self.assertEqual(gap, max(n["nw"] for n in first_col) + L.GRID_GAP)
+        self.assertLess(gap, L.CARD_W + L.GRID_GAP)
+
+    def test_search_opens_folders_folded_by_hand(self):
+        talks = [S.talk("a", "/w/x", NOW, title="deadman"), S.talk("b", "/w/y", NOW, title="deadman 2")]
+        self.assertTrue(node(lay(talks, dirs={"/w": True}), "dir:/w")["collapsed"])
+        out = lay(talks, dirs={"/w": True}, filters={"q": "deadman"})
+        self.assertFalse(node(out, "dir:/w")["collapsed"])
+        self.assertIn("card:/w/x", {n["uid"] for n in out.nodes})
+
+    def test_long_subagent_chain(self):
+        talks = [S.talk("s0", "/w", NOW)]
+        for i in range(1, 3000):
+            talks.append(S.talk("s%d" % i, "/w", NOW, parent="claude:s%d" % (i - 1), created=NOW + i))
+        out = lay(talks)
+        self.assertEqual([r["depth"] for r in out.rows["/w"]], list(range(3000)))
+
     def test_age_text(self):
         cases = [(0, "now"), (59, "now"), (60, "1m"), (3599, "59m"), (3600, "1h"), (DAY - 1, "23h"),
                  (DAY, "1d"), (14 * DAY - 1, "13d"), (14 * DAY, "2w"), (60 * DAY - 1, "8w"), (60 * DAY, "2mo")]

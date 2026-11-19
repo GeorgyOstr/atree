@@ -14,6 +14,7 @@ from .. import calendars, ical, timers
 from ..calendars import PALETTE, FetchError
 
 FETCH_EVERY = 600
+MAX_WAIT = 3600  # the longest fetch deadline: FETCH_EVERY or the failure back-off cap
 REMIND = 300
 FALLBACK_CAP = 300.0
 MIN_DELAY = 0.05
@@ -33,6 +34,8 @@ def _mtime(path):
 
 
 _UNSEEN = object()
+_REMIND_ERROR = "can't save reminders: "
+_CACHE_ERROR = "can't save calendar cache: "
 
 
 # ---------------------------------------------------------------- timerfd
@@ -230,11 +233,9 @@ class Timers(QObject):
         now = _now() if now is None else now
         if any(not t.get("fired") and t["due"] <= now for t in self.timers):
             try:
-                mine, self.timers = timers.claim_due(now)
+                mine, self.timers, self._seen = timers.claim_due(now, stamp=True)
             except OSError:
                 mine = []
-            else:
-                self._seen = _mtime(timers.FILE)
             for t in mine:
                 kind = "alarm" if t.get("alarm") else "timer"
                 timers.notify(t.get("label") or kind.capitalize(), "%s · %s" % (kind, timers.hhmm(t["due"])))
@@ -277,18 +278,16 @@ class Timers(QObject):
         timer = {"id": timers.new_id(), "due": parsed["due"], "label": parsed["label"],
                  "alarm": parsed["alarm"], "fired": False}
         try:
-            self.timers = timers.edit(lambda ts: ts.append(timer))
+            self.timers, self._seen = timers.edit(lambda ts: ts.append(timer), stamp=True)
         except OSError as e:
             return "can't save timers: %s" % e
-        self._seen = _mtime(timers.FILE)
         self.tick()
         return ""
 
     @Slot(str)
     def remove(self, timer_id):
         try:
-            self.timers = timers.edit(lambda ts: [t for t in ts if t["id"] != timer_id])
-            self._seen = _mtime(timers.FILE)
+            self.timers, self._seen = timers.edit(lambda ts: [t for t in ts if t["id"] != timer_id], stamp=True)
         except OSError:
             pass
         self.tick()
@@ -313,7 +312,7 @@ class Agenda(QObject):
         self._running = False
         self._closed = False
         self._state = {"events": [], "calendars": [], "adding": False, "error": ""}
-        self._handled = set()
+        self._handled = {}
         self._seen = _UNSEEN
         self._round_done.connect(self._on_round)
         self._add_done.connect(self._on_added)
@@ -324,6 +323,10 @@ class Agenda(QObject):
     calendars = Property(list, lambda self: self._state["calendars"], notify=changed)
     adding = Property(bool, lambda self: self._state["adding"], notify=changed)
     error = Property(str, lambda self: self._state["error"], notify=changed)
+
+    def _clear_error(self, prefix):
+        if self._state["error"].startswith(prefix):
+            self._set(error="")
 
     def _set(self, **values):
         if any(self._state[k] != v for k, v in values.items()):
@@ -353,11 +356,16 @@ class Agenda(QObject):
                 del d[cid]
         for c in self._cals:
             if c["id"] not in self._deadline:
-                self._deadline[c["id"]] = self._cache.get(c["id"], {}).get("at", 0) + FETCH_EVERY
+                at = self._cache.get(c["id"], {}).get("at", 0)
+                self._deadline[c["id"]] = min(at, _now()) + FETCH_EVERY
         self.tick()
 
     def tick(self, now=None):
         now = _now() if now is None else now
+        time.tzset()  # localtime_r never re-reads the zone; follow system zone changes like ical does
+        for cid, d in self._deadline.items():
+            if d > now + MAX_WAIT:  # the clock went back
+                self._deadline[cid] = now
         due = [cid for cid, d in self._deadline.items() if d <= now]
         if due and not self._running:
             self._start_round(due)
@@ -413,9 +421,12 @@ class Agenda(QObject):
         try:
             won = timers.claim_once(key)
         except OSError as e:
-            self._set(error="can't save reminders: %s" % _describe(e))
+            self._set(error=_REMIND_ERROR + _describe(e))
             return False
-        self._handled.add(key)
+        self._clear_error(_REMIND_ERROR)
+        for k in [k for k, start in self._handled.items() if start < now - timers.CLAIM_TTL]:
+            del self._handled[k]
+        self._handled[key] = s
         if won:
             try:
                 timers.notify(ev["title"], "in %d min · %s" % (max(1, round((s - now) / 60)), timers.hhmm(s)))
@@ -437,7 +448,7 @@ class Agenda(QObject):
         for cid, url in jobs:
             now = _now()
             entry = disk.get(cid)
-            if entry is not None and now - entry.get("at", 0) < FETCH_EVERY - 30:
+            if entry is not None and 0 <= now - entry.get("at", 0) < FETCH_EVERY - 30:
                 results[cid] = entry
                 continue
             try:
@@ -459,7 +470,7 @@ class Agenda(QObject):
                 continue
             if isinstance(result, Exception):
                 n = self._fails[cid] = self._fails.get(cid, 0) + 1
-                self._deadline[cid] = now + min(3600, 60 * 2 ** (n - 1))
+                self._deadline[cid] = now + min(MAX_WAIT, 60 * 2 ** (n - 1))
             else:
                 self._fails.pop(cid, None)
                 self._cache[cid] = result
@@ -469,17 +480,20 @@ class Agenda(QObject):
 
     def _save_cache(self, report=True):
         disk = calendars.load_cache()
+        now = _now()
         merged = {}
         for c in self._cals:
             entries = [x for x in (self._cache.get(c["id"]), disk.get(c["id"])) if x is not None]
-            if entries:
-                merged[c["id"]] = max(entries, key=lambda x: x.get("at", 0))
+            if entries:  # newest wins, but an entry dated in the future (clock went back) loses
+                merged[c["id"]] = max(entries, key=lambda x: (x.get("at", 0) <= now, x.get("at", 0)))
         self._cache = merged
         try:
             calendars.save_cache(merged)
         except OSError as e:
             if report:
-                self._set(error="can't save calendar cache: %s" % _describe(e))
+                self._set(error=_CACHE_ERROR + _describe(e))
+        else:
+            self._clear_error(_CACHE_ERROR)
 
     # -------------------------------------------------------- adding / removing
 
@@ -516,12 +530,19 @@ class Agenda(QObject):
         self._cache[cid] = entry
         try:
             with timers.lock():
-                cals = calendars.load_list()
-                cals.append({"id": cid, "name": name, "url": url, "color": calendars.pick_color(cals)})
-                calendars.save_list(cals)
+                cals = calendars.load_list(strict=True)
+                duplicate = any(c["url"] == url for c in cals)  # another window added it meanwhile
+                if not duplicate:
+                    cals.append({"id": cid, "name": name, "url": url, "color": calendars.pick_color(cals)})
+                    calendars.save_list(cals)
         except OSError as e:
             del self._cache[cid]
             self._set(adding=False, error="can't save calendars: %s" % _describe(e))
+            return
+        if duplicate:
+            del self._cache[cid]
+            self.reload(force=True)
+            self._set(adding=False, error="that calendar is already added")
             return
         self.reload(force=True)
         self._save_cache(report=False)
@@ -531,7 +552,7 @@ class Agenda(QObject):
     def removeCalendar(self, cal_id):
         try:
             with timers.lock():
-                calendars.save_list([c for c in calendars.load_list() if c["id"] != cal_id])
+                calendars.save_list([c for c in calendars.load_list(strict=True) if c["id"] != cal_id])
         except OSError as e:
             self._set(error="can't save calendars: %s" % _describe(e))
         self.reload(force=True)

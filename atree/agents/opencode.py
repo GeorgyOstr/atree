@@ -24,10 +24,6 @@ _lock = threading.Lock()
 _state = {"key": None, "rows": []}
 
 
-def _num(v):
-    return v if type(v) in (int, float) else 0
-
-
 def _data(raw):
     try:
         d = json.loads(raw) if raw else {}
@@ -87,7 +83,7 @@ def _read(path):
             role = row[4] if v2 else d.get("role")
             if role == "user":
                 s["prompts"] += 1
-                if type(created) in (int, float) and created > 0:
+                if _seconds(created):
                     day = base.local_day(created / 1000)
                     s["days"][day] = s["days"].get(day, 0) + 1
                 if not s["first_msg"]:
@@ -97,8 +93,8 @@ def _read(path):
             elif role == "assistant" and isinstance(d.get("tokens"), dict):
                 t = d["tokens"]
                 cache = t.get("cache") if isinstance(t.get("cache"), dict) else {}
-                ctx = (_num(t.get("input")) + _num(t.get("output")) + _num(t.get("reasoning"))
-                       + _num(cache.get("read")) + _num(cache.get("write")))
+                ctx = (base.num(t.get("input")) + base.num(t.get("output")) + base.num(t.get("reasoning"))
+                       + base.num(cache.get("read")) + base.num(cache.get("write")))
                 s["context"] = ctx
                 s["msg_tokens"] += ctx
         if pending and "part" in tables:
@@ -147,6 +143,15 @@ def _server_up():
     return pid > 0 and base.pid_alive(pid)
 
 
+def _seconds(ms):
+    """Epoch milliseconds as seconds, or 0 when not a usable time."""
+    try:
+        sec = ms / 1000 if type(ms) in (int, float) and ms > 0 else 0
+    except OverflowError:
+        return 0
+    return sec if base.is_timestamp(sec) else 0
+
+
 def _int(v):
     try:
         return int(v or 0)
@@ -179,19 +184,20 @@ class OpenCode(Agent):
             if r.get("time_archived") or not r["prompts"] or not isinstance(r.get("id"), str):
                 continue
             sid = r["id"]
-            updated = (r.get("time_updated") or r.get("time_created") or 0) / 1000
+            created = _seconds(r.get("time_created"))
+            updated = _seconds(r.get("time_updated")) or created
             busy = bool(r.get("time_suspended")) or _int(r.get("time_busy")) > _int(r.get("time_idle"))
             if busy:
                 if server is None:
                     server = _server_up()
                 busy = server
-            live = busy or now - updated < LIVE_WINDOW
-            tokens = sum(_num(r.get(c)) for c in TOKEN_COLS) or r["msg_tokens"]
+            live = busy or abs(now - updated) < LIVE_WINDOW  # abs: a time far ahead is a clock step
+            tokens = sum(base.num(r.get(c)) for c in TOKEN_COLS) or r["msg_tokens"]
             talks.append(base.talk(
                 "opencode", sid, cwd=r.get("directory") or "/",
                 title=base.pick_title(r.get("title"), r["first_msg"][:80], sid=sid, n=12),
                 first_msg=r["first_msg"],
-                created=(r.get("time_created") or 0) / 1000 or updated, updated=updated,
+                created=created or updated, updated=updated,
                 prompts=r["prompts"], days=dict(r["days"]), path=DB,
                 parent="opencode:%s" % r["parent_id"] if r.get("parent_id") else None,
                 live=live, live_status="busy" if busy else "active" if live else None,

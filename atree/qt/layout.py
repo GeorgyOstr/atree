@@ -363,10 +363,13 @@ def _cycles(t, by_key):
     return False
 
 
-def _expand(t, kids, depth=0):
-    yield t, depth
-    for c in kids.get(t["key"], ()):
-        yield from _expand(c, kids, depth + 1)
+def _expand(t, kids):
+    """``t`` and its descendants, depth first, with their depth (a stack: chains can be long)."""
+    stack = [(t, 0)]
+    while stack:
+        t, depth = stack.pop()
+        yield t, depth
+        stack.extend((c, depth + 1) for c in reversed(kids.get(t["key"], ())))
 
 
 def _trie(tops):
@@ -442,13 +445,13 @@ def card_mode(path, items, ctx):
 
 
 def dir_folded(path, items, has_children, ctx):
-    if not has_children or ctx.ai_keys:
+    if not has_children or ctx.ai_keys or ctx.q:  # a search shows every match, like card_mode
         return False
     o = ctx.dirs.get(path)
     if isinstance(o, bool):
         return o
     live, last = _stats(items, ctx.now)
-    if ctx.q or live:
+    if live:
         return False
     return ctx.now - last > FOLD_AFTER
 
@@ -490,7 +493,7 @@ def compute_layout(talks, ctx):
             "count": len(node.items), "talks": sum(1 for _, d in node.items if d == 0),
             "live": live, "collapsed": mode == "collapsed", "mode": mode,
             "age": age_text(ctx.now - last) if last else "",
-            "_last": last, "_keys": [(t["key"], d) for t, d in node.items]})
+            "_keys": [(t["key"], d) for t, d in node.items]})
         return h
 
     def place(node, x):
@@ -504,13 +507,23 @@ def compute_layout(talks, ctx):
         if node.kind == "grid":
             cols = 3 if len(node.children) >= 7 else 2
             col_y = [cursor] * cols
+            col_w = [0.0] * cols
+            placed = []
             first = None
             for i, card in enumerate(node.children):
                 c = i % cols
-                h = emit_card(card, x + c * (CARD_W + GRID_GAP), col_y[c])
+                h = emit_card(card, x, col_y[c])
+                placed.append((nodes[-1], c))
+                col_w[c] = max(col_w[c], nodes[-1]["nw"])
                 if first is None:
                     first = col_y[c] + HEAD_H / 2
                 col_y[c] += h + GRID_GAP
+            # each column is as wide as its widest card, so collapsed cards pack closer
+            col_x = [x]
+            for w in col_w[:-1]:
+                col_x.append(col_x[-1] + w + GRID_GAP)
+            for n, c in placed:
+                n["nx"] = col_x[c]
             cursor = max(col_y) - GRID_GAP + V_GAP
             live, _ = _stats(node.items, ctx.now)
             return first, live
@@ -523,7 +536,7 @@ def compute_layout(talks, ctx):
               "count": sum(1 for _, d in node.items if d == 0), "talks": 0,
               "live": live, "collapsed": folded, "mode": "",
               "age": age_text(ctx.now - last) if last else "",
-              "_last": last, "_keys": [(t["key"], d) for t, d in node.items]}
+              "_keys": [(t["key"], d) for t, d in node.items]}
         nodes.append(me)
         # the root and big folders grow a trunk: branches hang below, slightly indented, instead
         # of starting past the pill's right end, so wide trees keep to the left
@@ -594,7 +607,6 @@ def restyle(shown, by_key, ctx):
         m = dict(n)
         m["live"] = live
         m["age"] = age_text(ctx.now - last) if last else ""
-        m["_last"] = last
         if n["kind"] == "card":
             m["count"] = len(present)
             m["talks"] = sum(1 for _, d in present if d == 0)

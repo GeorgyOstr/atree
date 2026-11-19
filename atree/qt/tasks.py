@@ -7,9 +7,13 @@ from atree import ops
 from atree.fsutil import atomic_write
 
 
+class _Unreadable(Exception):
+    """The task file exists but could not be read; writing now would lose its tasks."""
+
+
 def _clean(raw):
     if not isinstance(raw, list):
-        return []
+        raise ValueError("the task file does not hold a list")
     return [dict(t) for t in raw if isinstance(t, dict) and "id" in t]
 
 
@@ -22,6 +26,9 @@ class TaskList:
 
     ``on_change()`` is called when the list visible to the view changed;
     ``on_error(message)`` when a save failed.
+
+    A task file that exists but can't be read (I/O error, bad JSON) keeps the last good list
+    and blocks edits, so a save never replaces tasks this window could not see.
     """
 
     def __init__(self, on_change=None, on_error=None):
@@ -29,7 +36,10 @@ class TaskList:
         self._mtime = None
         self.on_change = on_change or (lambda: None)
         self.on_error = on_error or (lambda msg: None)
-        self._read_if_changed()
+        try:
+            self._read_if_changed()
+        except _Unreadable:
+            pass
 
     @staticmethod
     def path():
@@ -42,29 +52,43 @@ class TaskList:
             return None
 
     def _read_if_changed(self):
-        """Reload when the file's mtime moved; True if the list changed."""
+        """Reload when the file's mtime moved; True if the list changed.
+
+        Raises ``_Unreadable`` (keeping the list as it was) when the file is there but unreadable.
+        """
         stamp = self._stamp()
         if stamp == self._mtime and stamp is not None:
             return False
-        self._mtime = stamp
         try:
             with open(self.path(), encoding="utf-8") as f:
                 items = _clean(json.load(f))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             items = []
+        except (OSError, ValueError) as e:
+            self._mtime = None  # try again next time
+            raise _Unreadable(str(e)) from None
+        self._mtime = stamp
         if items == self.items:
             return False
         self.items = items
         return True
 
     def reload(self):
-        if self._read_if_changed():
+        try:
+            changed = self._read_if_changed()
+        except _Unreadable:
+            return  # reported when an edit is tried
+        if changed:
             self.on_change()
 
     def _edit(self, fn):
         try:
             with ops.tasks_lock():
-                outside = self._read_if_changed()
+                try:
+                    outside = self._read_if_changed()
+                except _Unreadable as e:
+                    self.on_error("can't read tasks, not saving: %s" % e)
+                    return
                 new = fn([dict(t) for t in self.items])
                 if new is None or new == self.items:
                     if outside:

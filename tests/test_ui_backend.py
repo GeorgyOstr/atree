@@ -83,6 +83,18 @@ class ScanTest(unittest.TestCase):
         S.pump(50)
         b.collector.assert_not_called()
 
+    def test_scan3_error_shown_again_after_it_cleared(self):
+        b = backend()
+        rec = Recorder(b)
+        t = [S.talk("a", "/p", NOW)]
+        b.apply_scan(t, ["x"])
+        b.apply_scan(None, failure="bad")      # a failed scan says nothing about "x"
+        b.apply_scan(t, ["x"])
+        b.apply_scan(t, [])
+        b.apply_scan(t, ["x"])
+        b.apply_scan(None, failure="bad")
+        self.assertEqual([m for m, e in rec.toasts], ["x", "scan failed: bad", "x", "scan failed: bad"])
+
     def test_scan1_one_queued_rescan(self):
         b = backend()
         calls = []
@@ -568,6 +580,21 @@ class AiTest(unittest.TestCase):
         b.ai_answer(b._ai_gen, RuntimeError("Claude failed: x"))
         self.assertEqual(b.ai["error"], "Claude failed: x")
 
+    def test_editing_the_query_drops_the_pending_answer(self):
+        b = backend()
+        b.apply_scan([S.talk("a", "/p", NOW, title="apple"), S.talk("b", "/q", NOW, title="banana")])
+        with mock.patch.object(b, "_spawn"):
+            b.setFilter("q", "apple ")
+            b.aiSearch("claude", "apple ")
+            gen = b._ai_gen
+            b.setFilter("q", "apple")            # same query: the search goes on
+            self.assertTrue(b.ai["busy"])
+            b.setFilter("q", "banana")
+        self.assertFalse(b.ai["busy"])
+        b.ai_answer(gen, [{"key": "claude:a", "why": ""}])
+        self.assertEqual(b.ai["results"], [])
+        self.assertEqual(row_keys(b, "/q"), ["claude:b"])
+
 
 class BatchTest(unittest.TestCase):
     def setUp(self):
@@ -609,6 +636,38 @@ class BatchTest(unittest.TestCase):
     def common(self):
         self.assertEqual(self.b.selection, set())
         self.assertEqual(len(self.refreshes), 1)
+
+    def test_batch5_keeps_selection_made_meanwhile(self):
+        b = self.b
+        b.select("claude:two", True)               # picked while the batch on "one" ran
+        b.batch_done((["claude:one"], []), "moved %d talk(s)", False, ["claude:one"])
+        self.assertEqual(b.selection, {"claude:two"})
+        self.assertEqual(b.details_key, "claude:two")
+
+    def test_restore_skips_keys_not_archived(self):
+        b = backend()
+        rec = Recorder(b)
+        b.collector = lambda: ([], [])
+        b.apply_scan([S.talk("live", "/p", NOW), S.talk("gone", "/p", NOW)])
+        done = []
+        with mock.patch.object(ops, "restore", side_effect=lambda k: done.append(k)), \
+                mock.patch.object(ops, "archived", return_value={"claude:gone": {}}):
+            b.restore(["claude:live", "claude:gone"])
+            for _ in range(20):
+                S.pump(20)
+                if rec.toasts:
+                    break
+            self.assertEqual(done, ["claude:gone"])
+            self.assertEqual(rec.toasts, [("restored 1 talk(s)", False)])
+            rec.reset()
+            b.restore(["claude:live"])
+            for _ in range(20):
+                S.pump(20)
+                if rec.toasts:
+                    break
+        self.assertEqual(done, ["claude:gone"])
+        self.assertEqual(rec.toasts, [("none of these talks is archived", True)])
+        b.shutdown()
 
     def test_archive_filters_and_runs_ops(self):
         b = backend()
@@ -692,10 +751,32 @@ class TasksTest(unittest.TestCase):
         with open(ops.TASKS_FILE, "w") as f:
             json.dump({"not": "a list"}, f)
         os.utime(ops.TASKS_FILE, ns=(st.st_atime_ns, st.st_mtime_ns + 2 * 10 ** 9))
-        with mock.patch.object(tasks_mod, "atomic_write", side_effect=OSError(28, "No space left on device")):
-            b.addTask("x")
-        self.assertEqual(rec["tasksChanged"], 2)
-        self.assertEqual(b.tasks, [])
+        b.addTask("x")                    # not a list: unreadable, so nothing is written over it
+        self.assertEqual(rec["tasksChanged"], 1)
+        self.assertEqual([t["text"] for t in b.tasks], ["theirs"])
+        self.assertEqual(self.disk(), {"not": "a list"})
+
+    def test_task8_unreadable_file_is_not_overwritten(self):
+        b, rec = self.b, self.rec
+        b.addTask("one")
+        b.addTask("two")
+        rec.reset()
+        st = os.stat(ops.TASKS_FILE)
+        os.utime(ops.TASKS_FILE, ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+        real_open = open
+
+        def failing_open(path, *a, **k):
+            if path == ops.TASKS_FILE:
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, *a, **k)
+
+        with mock.patch("builtins.open", failing_open):
+            b._tasks.reload()             # a failed reload keeps what was shown
+            b.addTask("new")
+        self.assertEqual([t["text"] for t in b.tasks], ["one", "two"])
+        self.assertEqual(rec.toasts, [("can't read tasks, not saving: [Errno 13] Permission denied", True)])
+        b.addTask("new")                  # readable again: the edit goes through on top
+        self.assertEqual([t["text"] for t in self.disk()], ["one", "two", "new"])
 
 
 class SettingsBackendTest(unittest.TestCase):
@@ -909,3 +990,37 @@ class CompressTest(unittest.TestCase):
         b._test_clock.advance(540)
         b.apply_scan(list(b.talks))
         self.assertEqual(b.compressState, {})               # the 10 minutes are over
+
+
+class UsageWorkerTest(unittest.TestCase):
+    def test_slow_usage_neither_stacks_nor_blocks_scans(self):
+        import threading
+        b = backend()
+        gate = threading.Event()
+        calls = []
+
+        def slow(force=False):
+            calls.append(force)
+            gate.wait(5)
+            return {}
+
+        b.usage_source = slow
+        b.collector = lambda: ([S.talk("a", "/p", NOW)], [])
+        b._fetch_usage(False)
+        b._fetch_usage(False)
+        b.refreshUsage()
+        b.refreshUsage()
+        b.refresh()                      # the scan runs while usage is stuck
+        for _ in range(50):
+            S.pump(20)
+            if b.talks:
+                break
+        self.assertEqual([t["key"] for t in b.talks], ["claude:a"])
+        self.assertEqual(calls, [False])
+        gate.set()
+        for _ in range(50):
+            S.pump(20)
+            if len(calls) == 2 and not b._usage_busy:
+                break
+        self.assertEqual(calls, [False, True])  # one forced fetch for the two asks
+        b.shutdown()

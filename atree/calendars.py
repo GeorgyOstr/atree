@@ -27,11 +27,18 @@ class FetchError(Exception):
     """A user-facing fetch failure; the message never contains the address."""
 
 
-def _json(path):
+def _json(path, strict=False):
+    """Parsed JSON or None; with ``strict``, read errors other than a missing file raise."""
     try:
         with open(path, "rb") as f:
             return json.loads(f.read())
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return None
+    except OSError:
+        if strict:
+            raise
+        return None
+    except ValueError:
         return None
 
 
@@ -45,8 +52,9 @@ def _valid_calendar(c):
             and isinstance(c.get("color", ""), str))
 
 
-def load_list():
-    data = _json(LIST)
+def load_list(strict=False):
+    """The valid calendars; pass ``strict`` before rewriting the list so a failed read aborts."""
+    data = _json(LIST, strict)
     return [c for c in data if _valid_calendar(c)] if isinstance(data, list) else []
 
 
@@ -124,7 +132,9 @@ def fetch(url):
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "atree"})
         with urllib.request.urlopen(request, timeout=20) as response:
-            data = response.read(MAX_BYTES)
+            data = response.read(MAX_BYTES + 1)
+        if len(data) > MAX_BYTES:
+            error = "the calendar is too large"
     except urllib.error.HTTPError as e:
         e.close()
         error = "the server answered HTTP %d" % e.code

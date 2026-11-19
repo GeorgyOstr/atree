@@ -13,6 +13,10 @@ Rectangle {
     property real fade: faded ? 0.15 : 1
     Behavior on fade { NumberAnimation { duration: Theme.slow } }
     signal fitRequested()
+    // backend.agents is re-read on every backend change; going through its text keeps the
+    // chips (and a chip drag in progress) alive until the list itself changes
+    readonly property string agentsJson: JSON.stringify(backend.agents)
+    readonly property var agentList: JSON.parse(agentsJson)
 
     // one 66 px band when everything fits: chips + tool buttons over the age/sort toolbar, usage
     // blocks on the right spanning both; a narrow window moves the tools and usage below it
@@ -155,7 +159,7 @@ Rectangle {
                     spacing: 5
                     Repeater {
                         id: chipRep
-                        model: backend.agents
+                        model: header.agentList
                         Chip {
                             required property var modelData
                             required property int index
@@ -177,7 +181,7 @@ Rectangle {
                         id: chipOrder
                         repeater: chipRep
                         spacing: chipRow.spacing
-                        names: backend.agents.map(a => a.name)
+                        names: header.agentList.map(a => a.name)
                     }
                     Chip {
                         text: "Running only"

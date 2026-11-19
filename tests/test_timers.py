@@ -136,7 +136,7 @@ class Notify(unittest.TestCase):
     def test_R_notify_01_commands(self):
         started = self.run_notify({"notify-send", "canberra-gtk-play", "paplay"})
         self.assertEqual([a for a, _ in started], [
-            ["notify-send", "-a", "atree", "-i", "alarm-symbolic", "Title", "Body"],
+            ["notify-send", "-a", "atree", "-i", "alarm-symbolic", "--", "Title", "Body"],
             ["canberra-gtk-play", "-i", "alarm-clock-elapsed", "-d", "atree"]])
         for _, k in started:
             self.assertEqual((k["stdin"], k["stdout"], k["stderr"]), (subprocess.DEVNULL,) * 3)
@@ -249,6 +249,25 @@ class Parse(unittest.TestCase):
         set_tz(self, "Europe/Berlin")
         self.assertNotEqual(timers.parse("14:30", now)["due"], ny)
         self.assertEqual(timers.hhmm(now), "18:00")
+
+
+class ReadFailures(HomeCase):
+    def test_unreadable_file_is_never_overwritten(self):
+        timers.edit(lambda ts: [{"id": "a", "due": 1}])
+        before = read(timers.FILE)
+        with mock.patch.object(timers, "open", side_effect=PermissionError(13, "Permission denied"), create=True):
+            self.assertEqual(timers.load(), [])
+            for mutate in (lambda: timers.edit(lambda ts: []), lambda: timers.claim_due(100),
+                           lambda: timers.claim_once("k")):
+                with self.assertRaises(OSError):
+                    mutate()
+        self.assertEqual(read(timers.FILE), before)
+
+    def test_stamp_is_taken_under_the_lock(self):
+        result, stamp = timers.edit(lambda ts: [{"id": "a", "due": 1}], stamp=True)
+        self.assertEqual((result, stamp), ([{"id": "a", "due": 1}], os.stat(timers.FILE).st_mtime_ns))
+        mine, _, stamp = timers.claim_due(100, stamp=True)
+        self.assertEqual((len(mine), stamp), (1, os.stat(timers.FILE).st_mtime_ns))
 
 
 if __name__ == "__main__":

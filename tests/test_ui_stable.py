@@ -277,3 +277,35 @@ class DragTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestoreViewTest(unittest.TestCase):
+    def test_saved_pan_survives_the_empty_start(self):
+        # the window opens before the first scan: bounds are collapsed until content arrives
+        b = S.make_backend()
+        v = S.View(b, stored_view={"x": -500.0, "y": -600.0, "scale": 1.0, "saved": True})
+        S.pump(100)
+        b.apply_scan([S.talk("t%d_%d" % (i, j), "/w/c%02d" % i, NOW - i * 100 - j)
+                      for i in range(15) for j in range(8)])
+        S.pump(300)
+        c, w = v.find("treeCanvas"), v.find("world")
+        self.assertLess(c.property("minX"), -100)
+        # clamped to the real bounds, not pushed back to the top-left corner
+        self.assertEqual((w.property("x"), w.property("y")),
+                         (max(-500.0, c.property("minX")), max(-600.0, c.property("minY"))))
+        v.close()
+
+
+class ChipStabilityTest(unittest.TestCase):
+    def test_agent_chips_survive_unrelated_backend_changes(self):
+        b = S.make_backend()
+        b.apply_scan([S.talk("a", "/w/a", NOW), S.talk("b", "/w/b", NOW, tool="codex")])
+        v = S.View(b)
+        S.pump(200)
+        chips = v.find_all("agentChip")
+        self.assertGreaterEqual(len(chips), 2)
+        b.setFilter("live", True)            # announces a change; the agent list is the same
+        S.pump(100)
+        self.assertTrue(all(a is c for a, c in zip(chips, v.find_all("agentChip"))))
+        b.setFilter("live", False)           # filters are saved: leave none for later tests
+        v.close()

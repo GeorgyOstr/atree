@@ -130,7 +130,8 @@ class ToastTest(unittest.TestCase):
         b = S.make_backend()
         v = S.View(b)
         restored = []
-        with mock.patch.object(ops, "restore", side_effect=lambda k: restored.append(k)):
+        with mock.patch.object(ops, "restore", side_effect=lambda k: restored.append(k)), \
+                mock.patch.object(ops, "archived", return_value={"claude:x": {}}):
             b.collector = lambda: ([], [])
             b.undoable.emit("archived 1 talk(s)", ["claude:x"], False)
             S.pump(300)
@@ -319,6 +320,18 @@ class AgentOrderViewTest(unittest.TestCase):
             QTest.keyClick(v.win, Qt.Key_Escape)
             S.pump(50)
             self.assertEqual((b.ai["busy"], b.filters["q"], search.property("text")), (False, "", ""))
+            # editing while a search runs drops it: its late answer cannot override the new text
+            spawn.reset_mock()
+            search.forceActiveFocus()
+            S.type_text(v.win, "auth")
+            QTest.keyClick(v.win, Qt.Key_Return)
+            S.pump(50)
+            answer = spawn.call_args[0][1]
+            S.type_text(v.win, "z")
+            S.pump(50)
+            self.assertFalse(b.ai["busy"])
+            answer([{"key": b.talks[0]["key"], "why": "old"}])
+            self.assertEqual((b.ai["results"], b._ai_keys), ([], set()))
         self.assertEqual(v.all_warnings(), [])
         v.close()
 

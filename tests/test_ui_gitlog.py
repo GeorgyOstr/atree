@@ -100,6 +100,22 @@ class TasksDragTest(unittest.TestCase):
         self.assertNotEqual(S.call(panel, "dropIndex"), 0)
         v.close()
 
+    def test_tall_row_reaches_the_last_slot(self):
+        b, v = make()
+        b.addTask(" ".join(["a long wrapped task"] * 30))
+        b.addTask("short")
+        S.pump(200)
+        panel = v.find("tasksPanel")
+        tall, short = S.call(panel, "rowAt", 0), S.call(panel, "rowAt", 1)
+        self.assertGreater(tall.property("height"), 3 * short.property("height"))
+        panel.setProperty("dragFrom", 0)
+        # dragged as far down as the list allows: its bottom meets the list's bottom
+        panel.setProperty("dragDy", short.property("height"))
+        self.assertEqual(S.call(panel, "dropIndex"), 2)
+        panel.setProperty("dragDy", 0)
+        self.assertEqual(S.call(panel, "dropIndex"), 0)
+        v.close()
+
 
 class TimersRowTest(unittest.TestCase):
     def test_g5_label_starts_after_the_icon(self):

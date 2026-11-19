@@ -31,10 +31,6 @@ def prompt_text(content):
     return text[:400]
 
 
-def _num(v):
-    return v if type(v) in (int, float) else 0
-
-
 def _summary(msg):
     out = {"type": msg.get("type")}
     if isinstance(msg.get("timestamp"), str):
@@ -43,7 +39,7 @@ def _summary(msg):
         out["prompt"] = prompt_text(msg.get("content"))
     elif msg.get("type") == "gemini" and isinstance(msg.get("tokens"), dict):
         t = msg["tokens"]
-        out["tokens"] = (_num(t.get("input")) + _num(t.get("output")), _num(t.get("total")))
+        out["tokens"] = (base.num(t.get("input")) + base.num(t.get("output")), base.num(t.get("total")))
     return out
 
 
@@ -182,9 +178,12 @@ def chats():
             cwd = known.get(d.name)
         if not cwd:
             continue
-        for f in os.scandir(chat_dir):
-            if f.name.startswith("session-") and f.name.endswith((".jsonl", ".json")) and f.is_file():
-                out.append((cwd, f.path))
+        try:  # one unreadable project must not hide the others
+            for f in os.scandir(chat_dir):
+                if f.name.startswith("session-") and f.name.endswith((".jsonl", ".json")) and f.is_file():
+                    out.append((cwd, f.path))
+        except OSError:
+            continue
     return out
 
 
@@ -224,7 +223,7 @@ class Gemini(Agent):
             start = meta.get("startTime") if isinstance(meta.get("startTime"), str) else info["first"]
             last = meta.get("lastUpdated") if isinstance(meta.get("lastUpdated"), str) else info["last"]
             summary = meta.get("summary")
-            live = now - st.st_mtime < LIVE_WINDOW
+            live = abs(now - st.st_mtime) < LIVE_WINDOW  # abs: an mtime far ahead is a clock step
             t = base.talk(
                 "gemini", sid, cwd=cwd,
                 title=base.pick_title(summary if isinstance(summary, str) else None,

@@ -6,6 +6,7 @@ import threading
 import time
 
 from . import ops
+from .aisearch import _collapse
 from .agents import BY_NAME, OpError
 from .agents.base import fmt_tokens, tildify
 from .fsutil import atomic_write
@@ -69,11 +70,6 @@ def _row(s):
     }
 
 
-def _collapse(text, n=None):
-    text = " ".join((text or "").split())
-    return text[:n] if n else text
-
-
 def status(talks, tasks, written):
     counts = {}
     for t in talks:
@@ -131,7 +127,11 @@ def _link_tasks():
 def write_context(sessions=None):
     os.makedirs(AGENT_DIR, exist_ok=True)
     if sessions is None:
-        sessions = scan_all() + [dict(e, key=k, archived=True, live=False) for k, e in ops.archived().items()]
+        sessions = scan_all()
+        scanned = {s["key"] for s in sessions}
+        # mid-archive or restore (or after a failed removal) the files are still there: the scan wins
+        sessions += [dict(e, key=k, archived=True, live=False) for k, e in ops.archived().items()
+                     if isinstance(e, dict) and k not in scanned]
     own = [s for s in sessions if not is_own(s)]
     talks = [_row(s) for s in sorted(own, key=lambda s: (s["cwd"], -(s.get("updated") or 0)))]
     written = _when(time.time())
@@ -149,8 +149,13 @@ def open_terminal(agent, sessions):
     if a is None or not a.new_command:
         raise OpError("%s can't be the assistant" % agent)
     write_context(sessions)
-    resumable = any(s["tool"] == agent and is_own(s) and not s.get("archived") for s in sessions or [])
-    ops.run_in_terminal(AGENT_DIR, a.continue_command if resumable else a.new_command)
+    own = [s for s in sessions or [] if s["tool"] == agent and is_own(s) and not s.get("archived")]
+    if own:
+        last = max(own, key=lambda s: s.get("updated") or 0)
+        if last.get("live") or a.live_pid(last):  # shown where it runs, not continued twice
+            return ops.open_terminal(last["key"], last)
+    ops.run_in_terminal(AGENT_DIR, a.continue_command if own else a.new_command)
+    return "opening terminal…"
 
 
 def _compress_cli(cmd, rest):

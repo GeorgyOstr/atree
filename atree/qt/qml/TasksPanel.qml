@@ -48,15 +48,18 @@ SidePanel {
         var me = rowAt(dragFrom)
         if (!me)
             return dragFrom
-        var mid = me.y + dragDy + me.height / 2
+        // a neighbour is passed once the dragged row's leading edge crosses its middle
+        // (rows differ in height, so middles alone could leave the last slot out of reach)
+        var top = me.y + dragDy, bottom = top + me.height
+        var to = dragFrom
         for (var j = 0; j < rep.count; j++) {
-            if (j === dragFrom)
-                continue
-            var r = rowAt(j)
-            if (r.y + r.height / 2 > mid || (j === 0 && r.y + r.height / 2 >= mid))
+            var r = rowAt(j), mid = r.y + r.height / 2
+            if (j < dragFrom && top <= mid)
                 return j
+            if (j > dragFrom && bottom > mid)
+                to = j + 1
         }
-        return rep.count
+        return to
     }
 
     function shiftFor(i) {
@@ -174,19 +177,9 @@ SidePanel {
         }
     }
 
-    MouseArea {
+    WheelForwarder {
         anchors.fill: flick
-        acceptedButtons: Qt.NoButton
-        onWheel: wheel => {
-            var range = flick.contentHeight - flick.height
-            var touch = wheel.phase !== Qt.NoScrollPhase && wheel.pixelDelta.y !== 0
-            var dy = touch ? wheel.pixelDelta.y : wheel.angleDelta.y / 120 * 90
-            var to = Math.max(0, Math.min(range, flick.contentY - dy))
-            if (panel.dragFrom >= 0 || range <= 0 || Math.abs(to - flick.contentY) < 0.5) {
-                wheel.accepted = false
-                return
-            }
-            flick.contentY = to
-        }
+        list: flick
+        blocked: panel.dragFrom >= 0
     }
 }

@@ -1,4 +1,5 @@
 """Qt-side clock logic: sleeper, timers view model, agenda; plus calendar list/cache/fetch (spec clock.md §5, §8-10)."""
+import contextlib
 import errno
 import http.client
 import http.server
@@ -307,7 +308,7 @@ class TimersView(ViewCase):
             self.store({"id": "d", "due": due, "alarm": alarm})
             calls = []
             with mock.patch.object(timers, "claim_due",
-                                   lambda now: calls.append(now) or (_ for _ in ()).throw(OSError("disk full"))):
+                                   lambda now, **kw: calls.append(now) or (_ for _ in ()).throw(OSError("disk full"))):
                 t = self.make()
                 hits = self.counter(t)
                 for now in (1000, 1000, 1030.02, 1060.04):
@@ -357,7 +358,7 @@ class TimersView(ViewCase):
         self.assertAlmostEqual(self.armed[-1], 1030.02)
         claims = []
         real_claim = timers.claim_due
-        with mock.patch.object(timers, "claim_due", lambda now: claims.append(now) or real_claim(now)), \
+        with mock.patch.object(timers, "claim_due", lambda now, **kw: claims.append(now) or real_claim(now, **kw)), \
                 mock.patch.object(timers, "atomic_write", real_write):
             self.clock[0] = 1030.02
             for v in views:
@@ -512,10 +513,17 @@ class Fetch(unittest.TestCase):
         resp = FakeResponse(b"\xffBEGIN:vcalendar\nEND:VCALENDAR")
         text, reqs = self.fetch_with(resp)
         req, timeout = reqs[0]
-        self.assertEqual((req.get_header("User-agent"), timeout, resp.limit), ("atree", 20, 20_000_000))
+        self.assertEqual((req.get_header("User-agent"), timeout, resp.limit), ("atree", 20, 20_000_001))
         self.assertTrue(text.startswith("�BEGIN"))
         err, _ = self.fetch_with(FakeResponse(b" " * 2000 + b"BEGIN:VCALENDAR"))
         self.assertEqual(str(err), "that address doesn't serve an iCal calendar")
+
+    def test_fetch_too_large_is_an_error_not_a_truncated_calendar(self):
+        with mock.patch.object(calendars, "MAX_BYTES", 40):
+            err, _ = self.fetch_with(FakeResponse(b"BEGIN:VCALENDAR\n" + b"x" * 40))
+            self.assertEqual(str(err), "the calendar is too large")
+            text, _ = self.fetch_with(FakeResponse(b"BEGIN:VCALENDAR\n" + b"x" * 24))
+            self.assertTrue(text.startswith("BEGIN"))
 
     def test_R_fetch_04_error_mapping(self):
         fp = mock.Mock()
@@ -727,7 +735,7 @@ class AgendaView(AgendaCase):
     def removal_setup(self):
         self.clock[0] = 1000
         self.calendars_file("removed", "kept")
-        self.cache_file({"kept": {"at": 9400, "events": []}, "removed": {"at": 9400, "events": []}})
+        self.cache_file({"kept": {"at": 900, "events": []}, "removed": {"at": 900, "events": []}})
         a = self.make()
         a._fails.update(removed=2, kept=1)
         a._running = True
@@ -736,7 +744,7 @@ class AgendaView(AgendaCase):
 
     def test_R_ag_19_remove(self):
         a = self.removal_setup()
-        self.assertEqual((a._deadline, a._fails, a._running), ({"kept": 10000}, {"kept": 1}, True))
+        self.assertEqual((a._deadline, a._fails, a._running), ({"kept": 1500}, {"kept": 1}, True))
         self.assertNotIn("removed", a._cache)
         self.assertNotIn("removed", json.loads(read(calendars.CACHE)))
         self.assertEqual([c["id"] for c in calendars.load_list()], ["kept"])
@@ -751,13 +759,13 @@ class AgendaView(AgendaCase):
             a._fails.clear()
             a._on_round({"removed": result}, now=1000)
             self.assertFalse(a._running)
-            self.assertEqual((a._deadline, a._fails), ({"kept": 10000}, {}))
+            self.assertEqual((a._deadline, a._fails), ({"kept": 1500}, {}))
             self.assertNotIn("removed", a._cache)
             self.assertNotIn("removed", json.loads(read(calendars.CACHE)))
-            self.assertEqual(self.armed[-1], 10000)
-            for now in (1601, 1601.05):
+            self.assertEqual(self.armed[-1], 1500)
+            for now in (1101, 1101.05):
                 a.tick(now)
-                self.assertEqual(self.armed[-1], 10000)
+                self.assertEqual(self.armed[-1], 1500)
             self.assertEqual(self.fetches, [])
 
     def test_R_ag_14_cache_merge_and_save_failure(self):
@@ -773,6 +781,7 @@ class AgendaView(AgendaCase):
         self.assertEqual(a._deadline, {"kept": 1600})
         self.assertEqual(len(hits), 1)
         self.cache_file({"kept": {"at": 2000, "events": [self.timed("d", "Disk", 2100, 2200)]}})
+        self.clock[0] = 2000
         a._save_cache()
         self.assertEqual(a._cache, {"kept": {"at": 2000, "events": [self.timed("d", "Disk", 2100, 2200)]}})
         self.assertEqual(set(json.loads(read(calendars.CACHE))), {"kept"})
@@ -798,7 +807,7 @@ class Reminders(AgendaCase):
         self.calendars_file("c")
         self.cache_file({"c": {"at": self.clock[0], "events": [self.timed("m", "Meeting", self.start, ts(13))]}})
         a = self.make()
-        a._deadline["c"] = 1e12
+        a._deadline.clear()  # no fetch rounds
         return a
 
     def claims(self, *outcomes):
@@ -823,7 +832,7 @@ class Reminders(AgendaCase):
         for expect_err in (True, False, False):
             a.tick(now)
         self.assertEqual(calls, ["event:c:m:%r" % float(self.start)] * 2)
-        self.assertEqual(a.error, "can't save reminders: disk full")
+        self.assertEqual(a.error, "")  # cleared by the claim that worked
         self.assertEqual(self.notified, [("Meeting", "in 2 min · 12:00")])
 
     def test_R_rem_02_R_rem_04_lost_claim_or_failing_notification(self):
@@ -858,7 +867,8 @@ class Reminders(AgendaCase):
         self.assertEqual(self.armed[-1], self.start)
         a.tick(self.start - 59)
         self.assertEqual(self.armed[-1], self.start)
-        self.assertEqual((len(calls), len(self.notified), len(hits)), (3, 1, 1))
+        self.assertEqual((len(calls), len(self.notified), len(hits)), (3, 1, 2))  # error shown, then cleared
+        self.assertEqual(a.error, "")
         self.assertEqual(self.fetches, [])
 
     def test_R_rem_06_retry_never_delays(self):
@@ -868,7 +878,7 @@ class Reminders(AgendaCase):
         a._deadline["c"] = now + 10
         a.tick(now)
         self.assertEqual(self.armed[-1], now + 10)
-        a._deadline["c"] = 1e12
+        a._deadline.clear()
         a._cache["c"]["events"].append(self.timed("l", "Live", now - 60, now + 5))
         a.tick(now)
         self.assertEqual(self.armed[-1], now + 5)
@@ -999,6 +1009,93 @@ class FolderWatcher(HomeCase):
         self.assertTrue(ok)
         self.assertEqual(t.items[0]["id"], "w")
         self.assertEqual(a.calendars[0]["id"], "cal")
+
+
+# ---------------------------------------------------------------- review regressions
+
+class TimersRace(TimersView):
+    def test_write_by_another_process_right_after_ours_is_not_skipped(self):
+        t = self.make()
+        real_lock = timers.lock
+
+        @contextlib.contextmanager
+        def lock_then_foreign_write():
+            with real_lock():
+                yield
+            # another process writes between our lock release and any later stat
+            write(timers.FILE, json.dumps({"timers": [{"id": "theirs", "due": 5000}], "claimed": {}}))
+            os.utime(timers.FILE, ns=(1, 1))
+        with mock.patch.object(timers, "lock", lock_then_foreign_write):
+            self.assertEqual(t.add("25m tea"), "")
+        t.reload()
+        self.assertEqual([r["id"] for r in t.items], ["theirs"])
+
+
+class AgendaReviewFixes(AgendaCase):
+    def test_clock_went_back_after_a_future_dated_fetch(self):
+        self.clock[0] = 1000
+        self.calendars_file("c1")
+        self.cache_file({"c1": {"at": 1000 + 86400, "events": []}})
+        a = self.make()
+        self.assertEqual(a._deadline, {"c1": 1600})  # not a day away
+        self.assertEqual(self.fetches, [])
+        a._deadline["c1"] = 1000 + 86400 + 600  # armed while the clock was ahead
+        self.fetch_result = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"
+        a.tick()
+        self.assertEqual(self.fetches, [SECRET + "c1"])  # the future-dated disk entry is not reused
+        self.assertEqual(a._cache["c1"]["at"], 1000)  # and the fresh fetch wins the merge
+        self.assertEqual(a._deadline, {"c1": 1600})
+
+    def test_duplicate_added_meanwhile_by_another_window(self):
+        a = self.make()
+        self.calendars_file("c1")
+        a._on_added(("Again", SECRET + "c1", {"at": 1000, "events": []}))
+        self.assertEqual([c["id"] for c in calendars.load_list()], ["c1"])
+        self.assertEqual((a.adding, a.error), (False, "that calendar is already added"))
+        self.assertEqual(list(a._cache), [])
+
+    def test_unreadable_list_is_not_overwritten(self):
+        self.calendars_file("c1", "c2")
+        a = self.make()
+        before = read(calendars.LIST)
+        with mock.patch.object(calendars, "open", side_effect=PermissionError(13, "Permission denied"), create=True):
+            a.removeCalendar("c1")
+            self.assertEqual(a.error, "can't save calendars: Permission denied")
+            a._state["error"] = ""
+            a._on_added(("New", "https://x/new", {"at": 1000, "events": []}))
+            self.assertEqual(a.error, "can't save calendars: Permission denied")
+        self.assertEqual(read(calendars.LIST), before)
+
+    def test_cache_error_clears_after_a_good_save(self):
+        self.calendars_file("c1")
+        a = self.make()
+        with mock.patch.object(calendars, "save_cache", side_effect=OSError(28, "disk full")):
+            a._save_cache()
+        self.assertEqual(a.error, "can't save calendar cache: disk full")
+        a._save_cache()
+        self.assertEqual(a.error, "")
+        a._state["error"] = "that calendar is already added"
+        a._save_cache()
+        self.assertEqual(a.error, "that calendar is already added")  # other errors stay
+
+    def test_tick_follows_a_zone_change(self):
+        self.clock[0] = ts(9)
+        self.calendars_file("c1")
+        self.cache_file({"c1": {"at": ts(9), "events": [self.timed("m", "Meeting", ts(10), ts(11))]}})
+        a = self.make()
+        self.assertEqual(a.events[1]["time"], "10:00")
+        set_tz(self, "UTC")  # restores TZ afterwards
+        os.environ["TZ"] = "Asia/Tokyo"  # the system zone changes; nobody calls tzset
+        a.tick()
+        self.assertEqual(a.events[1]["time"], "19:00")
+
+    def test_handled_reminders_expire(self):
+        a = self.make()
+        with mock.patch.object(timers, "claim_once", return_value=False):
+            a._remind("c", {"uid": "old", "title": "Old", "start": 1000}, 900)
+            a._remind("c", {"uid": "new", "title": "New", "start": 1000 + timers.CLAIM_TTL + 10},
+                      1000 + timers.CLAIM_TTL + 5)
+        self.assertEqual(len(a._handled), 1)
 
 
 if __name__ == "__main__":

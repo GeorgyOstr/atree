@@ -193,7 +193,7 @@ Rectangle {
         PanelButton {
             visible: !panel.d.archived && !panel.d.live
             text: "Archive"
-            onClicked: Ui.app.archiveKeys(backend.actionKeys(panel.d.key))
+            onClicked: backend.archive(backend.actionKeys(panel.d.key))
         }
         PanelButton {
             visible: panel.d.archived === true

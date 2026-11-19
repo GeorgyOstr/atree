@@ -76,8 +76,27 @@ def rollouts():
     return out
 
 
+_index_cache = {"key": None, "value": None}
+
+
+def _file_key(path):
+    try:
+        return base.stat_key(os.stat(path))
+    except OSError:
+        return None
+
+
 def _index():
-    """(rows by id, spawn parent by child id) from Codex's thread index."""
+    """(rows by id, spawn parent by child id), re-read only when the database or its WAL changed."""
+    key = (CODEX_DB, _file_key(CODEX_DB), _file_key(CODEX_DB + "-wal"))
+    if key[1] is not None and key == _index_cache["key"]:
+        return _index_cache["value"]
+    value = _read_index()
+    _index_cache["key"], _index_cache["value"] = key, value
+    return value
+
+
+def _read_index():
     rows, edges = {}, {}
     if not os.path.exists(CODEX_DB):
         return rows, edges
@@ -105,32 +124,47 @@ def _index():
 
 
 def _update_index(sql, args):
+    """The number of rows changed; None when there is no index."""
     if not os.path.exists(CODEX_DB):
-        return
+        return None
     con = sqlite3.connect(CODEX_DB, timeout=5)
     try:
         with con:
-            con.execute(sql, args)
+            return con.execute(sql, args).rowcount
     finally:
         con.close()
 
 
-def _tail_rate_limits(path, limit=4_000_000):
+def _rate_limits(line):
+    if b'"rate_limits":{' not in line:
+        return None
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        return None
+    payload = rec.get("payload") if isinstance(rec, dict) else None
+    rl = payload.get("rate_limits") if isinstance(payload, dict) else None
+    if isinstance(rl, dict) and rl:
+        return rl, base.iso_to_epoch(rec.get("timestamp"))
+    return None
+
+
+def _tail_rate_limits(path, limit=4_000_000, chunk=1 << 16):
+    """The last rate-limit record within ``limit`` bytes of the end, read backwards in chunks."""
     with open(path, "rb") as f:
-        size = f.seek(0, 2)
-        f.seek(max(0, size - limit))
-        data = f.read()
-    for line in reversed(data.split(b"\n")):
-        if b'"rate_limits":{' not in line:
-            continue
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        payload = rec.get("payload") if isinstance(rec, dict) else None
-        rl = payload.get("rate_limits") if isinstance(payload, dict) else None
-        if isinstance(rl, dict) and rl:
-            return rl, base.iso_to_epoch(rec.get("timestamp"))
+        pos = f.seek(0, 2)
+        stop = max(0, pos - limit)
+        rest = b""  # the start of a line whose beginning is not read yet
+        while pos > stop:
+            step = min(chunk, pos - stop)
+            pos -= step
+            f.seek(pos)
+            lines = (f.read(step) + rest).split(b"\n")
+            rest = lines.pop(0) if pos > stop else b""
+            for line in reversed(lines):
+                found = _rate_limits(line)
+                if found:
+                    return found
     return None, None
 
 
@@ -160,9 +194,11 @@ class Codex(Agent):
 
     def rename(self, s, title):
         try:
-            _update_index("UPDATE threads SET title = ? WHERE id = ?", (title, s["id"]))
+            changed = _update_index("UPDATE threads SET title = ? WHERE id = ?", (title, s["id"]))
         except sqlite3.Error as e:
             raise OpError("Codex's thread index couldn't be updated (%s)" % e) from e
+        if not changed:  # titles are read from the index only
+            raise OpError("Codex's thread index has no entry for '%s'" % s["title"])
         if os.path.exists(CODEX_NAMES):  # the names Codex's own resume list shows; the last one counts
             stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000000Z"
             line = json.dumps({"id": s["id"], "thread_name": title, "updated_at": stamp}, separators=(",", ":"))
@@ -219,7 +255,7 @@ class Codex(Agent):
             if parent and row.get("agent_role"):
                 title = "[%s] %s" % (row["agent_role"], title)
             git = meta.get("git")
-            live = now - st.st_mtime < LIVE_WINDOW
+            live = abs(now - st.st_mtime) < LIVE_WINDOW  # abs: an mtime far ahead is a clock step
             talks.append(base.talk(
                 "codex", sid,
                 cwd=row.get("cwd") or meta.get("cwd") or "/",
@@ -263,14 +299,18 @@ class Codex(Agent):
                 paths.append((os.path.getmtime(p), p))
             except OSError:
                 pass
+        # a resumed old talk can be the newest file yet hold only old records: take the newest
+        # record of the five newest files (a file holds nothing newer than its mtime)
         for mtime, p in sorted(paths, reverse=True)[:5]:
+            if found and observed >= mtime:
+                break
             try:
-                found, observed = _tail_rate_limits(p)
+                rl, seen = _tail_rate_limits(p)
             except OSError:
                 continue
-            if found:
-                observed = observed or mtime
-                break
+            seen = seen or mtime
+            if rl and (not found or seen > observed):
+                found, observed = rl, seen
         if not found:
             return {"error": "no Codex rate-limit data yet"}
         now = time.time()

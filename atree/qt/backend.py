@@ -64,6 +64,13 @@ def _guard(fn, *args):
         return e
 
 
+def _archived_only(keys):
+    """The keys in the archive index. Read on the ops thread rather than taken from the last scan:
+    Undo restores talks archived a moment ago, and a selection can mix live and archived talks."""
+    index = ops.archived()
+    return [k for k in keys if isinstance(index, dict) and k in index]
+
+
 def _message(e):
     return str(e) or type(e).__name__
 
@@ -144,6 +151,10 @@ class Backend(QObject):
         self._rows = {}
         self._deliver.connect(self._on_deliver, Qt.QueuedConnection)
         self._pool = ThreadPoolExecutor(2, thread_name_prefix="atree-scan")
+        # usage has its own worker: a slow fetch must not hold up the scans
+        self._usage_pool = ThreadPoolExecutor(1, thread_name_prefix="atree-usage")
+        self._usage_busy = False
+        self._usage_force = False  # a forced fetch asked for while one was in flight
         self._ops = ThreadPoolExecutor(1, thread_name_prefix="atree-ops")
         self._tasks = TaskList(self.tasksChanged.emit, lambda m: self.toast.emit(m, True))
 
@@ -203,6 +214,7 @@ class Backend(QObject):
         self._scan_timer.stop()
         self._usage_timer.stop()
         self._pool.shutdown(wait=False, cancel_futures=True)
+        self._usage_pool.shutdown(wait=False, cancel_futures=True)
         self._ops.shutdown(wait=False)
 
     # ------------------------------------------------------------ settings
@@ -248,11 +260,17 @@ class Backend(QObject):
     def apply_scan(self, talks, errors=(), failure=None):
         """Scan completion (also the seam tests feed synthetic results through)."""
         self._scanning = False
+        # each error is shown once while it lasts; one that goes away and comes back is shown again
+        if failure is not None:
+            current = self._seen_errors | {"scan failed: %s" % failure}  # nothing learned about the rest
+        else:
+            current = set(errors)
         for e in errors:
             self._error_once(e)
         if failure is not None:
             self._error_once("scan failed: %s" % failure)
-        else:
+        self._seen_errors = current
+        if failure is None:
             talks = list(talks)
             minute = int(self.clock() // 60)  # age labels and the age filter have minute resolution
             before = dict(self.ranks.as_dict())
@@ -424,6 +442,8 @@ class Backend(QObject):
             value = "" if value is None else str(value)
         if value == cur:
             return
+        if name == "q" and self._ai["busy"] and value.strip() != self._ai["query"]:
+            self.clearAi()  # the pending answer was for another query
         self._filters[name] = value
         if name in self._agent_names:
             self._agent_toggled(name, value)
@@ -625,12 +645,16 @@ class Backend(QObject):
 
     # ------------------------------------------------------------ operations
 
-    def _batch(self, fn, keys, label, undoable=False):
+    def _batch(self, fn, keys, label, undoable=False, pick=None):
+        """Run ``fn`` on each key on the ops thread; ``pick(keys)`` there first narrows them."""
         keys = list(keys)
 
         def job():
             done, errors = [], []
-            for k in keys:
+            todo = keys if pick is None else pick(keys)
+            if not todo:
+                return done, ["none of these talks is archived"]
+            for k in todo:
                 try:
                     fn(k)
                     done.append(k)
@@ -640,9 +664,9 @@ class Backend(QObject):
                     errors.append(_message(e))
             return done, errors
 
-        self._submit(self._ops, job, lambda r: self.batch_done(r, label, undoable))
+        self._submit(self._ops, job, lambda r: self.batch_done(r, label, undoable, keys))
 
-    def batch_done(self, result, label, undoable=False):
+    def batch_done(self, result, label, undoable=False, keys=None):
         done, errors = ([], [_message(result)]) if isinstance(result, Exception) else result
         if undoable and done:
             self.undoable.emit("\n".join([label % len(done)] + list(errors)), list(done), bool(errors))
@@ -650,8 +674,13 @@ class Backend(QObject):
             self.toast.emit("\n".join(errors), True)
         else:
             self.toast.emit(label % len(done), False)
-        self.selection = set()
-        self.details_key = ""
+        if keys is None:
+            self.selection = set()
+            self.details_key = ""
+        else:  # what the user selected while the batch ran stays selected
+            self.selection -= set(keys)
+            if self.details_key in keys:
+                self.details_key = min(self.selection) if self.selection else ""
         self._rebuild()
         if done:
             self._after_op = True
@@ -679,7 +708,7 @@ class Backend(QObject):
     def restore(self, keys):
         keys = list(keys or [])
         if keys:
-            self._batch(ops.restore, keys, "restored %d talk(s)")
+            self._batch(ops.restore, keys, "restored %d talk(s)", pick=_archived_only)
 
     @Slot("QVariantList")
     def deleteArchived(self, keys):
@@ -920,12 +949,20 @@ class Backend(QObject):
         self._fetch_usage(True)
 
     def _fetch_usage(self, force):
-        self._submit(self._pool, self.usage_source, self._usage_result, force)
+        if self._usage_busy:  # one fetch at a time; a forced one waits for the running one
+            self._usage_force = self._usage_force or bool(force)
+            return
+        self._usage_busy = True
+        if self._submit(self._usage_pool, self.usage_source, self._usage_result, force) is None:
+            self._usage_busy = False
 
     def _usage_result(self, result):
-        if isinstance(result, Exception) or not isinstance(result, dict):
-            return
-        self.apply_usage(result)
+        self._usage_busy = False
+        if not isinstance(result, Exception) and isinstance(result, dict):
+            self.apply_usage(result)
+        if self._usage_force:
+            self._usage_force = False
+            self._fetch_usage(True)
 
     def apply_usage(self, data):
         self._usage_raw = dict(data)
